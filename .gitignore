@@ -1,0 +1,43 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Training outputs and generated artifacts
+runs/
+build/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.bin
+
+# Downloaded models and generated datasets are reproducible or too large for git.
+models/
+generated_data/
+
+# Local editor and assistant state
+.vscode/
+.claude/
+
+# Large archives / documents that are not source code
+*.zip
+*.rar
+*.7z
+*.pdf
+
+# Unrelated local study/interview folders
+DataStruct/
+quickdraw/
+openvla/
+计算机考/
+客路集团面试试卷/
+
+# OS files
+.DS_Store
+Thumbs.db
