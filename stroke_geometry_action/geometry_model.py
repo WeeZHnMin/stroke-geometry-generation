@@ -13,6 +13,9 @@ from stroke_baseline.pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR,
 from .geometry_dataset import GEOMETRY_STATE_DIM
 
 
+DEFAULT_GEOMETRY_ACTION_BINS = 512
+
+
 @dataclass
 class GeometryActionDecoderConfig:
     action_vocab_size: int
@@ -180,11 +183,10 @@ def build_default_geometry_action_model(
     max_action_len: int = 384,
     text_encoder_dir: str | Path = DEFAULT_TEXT_ENCODER_DIR,
 ) -> tuple[TextConditionedGeometryActionModel, StrokeActionTokenizer]:
-    action_tokenizer = StrokeActionTokenizer(ActionTokenizerConfig())
+    action_tokenizer = StrokeActionTokenizer(ActionTokenizerConfig(bins=DEFAULT_GEOMETRY_ACTION_BINS))
     cfg = GeometryActionDecoderConfig(
         action_vocab_size=action_tokenizer.vocab_size,
         pad_token_id=action_tokenizer.pad_id,
         max_action_len=max_action_len,
     )
     return TextConditionedGeometryActionModel(cfg, text_encoder_dir=text_encoder_dir), action_tokenizer
-

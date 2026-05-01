@@ -13,7 +13,11 @@ from stroke_baseline.pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR
 from stroke_baseline.train_action_tokens import compute_loss, update_sums, average
 
 from .geometry_dataset import GeometryActionTokenJsonlDataset
-from .geometry_model import GeometryActionDecoderConfig, TextConditionedGeometryActionModel
+from .geometry_model import (
+    DEFAULT_GEOMETRY_ACTION_BINS,
+    GeometryActionDecoderConfig,
+    TextConditionedGeometryActionModel,
+)
 
 
 def set_seed(seed: int) -> None:
@@ -108,7 +112,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--bins", type=int, default=256)
+    parser.add_argument("--bins", type=int, default=DEFAULT_GEOMETRY_ACTION_BINS)
     parser.add_argument("--min-value", type=float, default=-1.0)
     parser.add_argument("--max-value", type=float, default=1.0)
     parser.add_argument("--max-text-len", type=int, default=64)
@@ -173,4 +177,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
