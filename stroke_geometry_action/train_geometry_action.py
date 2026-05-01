@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 from pathlib import Path
 
@@ -54,7 +55,13 @@ def save_checkpoint(
     (output_dir / "train_args.json").write_text(json.dumps(vars(args), indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def train_one_epoch(model, loader, optimizer, device, args, tokenizer, epoch):
+def append_jsonl(path: Path, record: dict) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+        f.flush()
+
+
+def train_one_epoch(model, loader, optimizer, device, args, tokenizer, epoch, step_log_path: Path):
     model.train()
     model.text_encoder.eval()
     totals: dict[str, float] = {}
@@ -74,10 +81,21 @@ def train_one_epoch(model, loader, optimizer, device, args, tokenizer, epoch):
         optimizer.step()
         update_sums(totals, counts, metrics)
         if step % args.log_every == 0:
-            print(
+            line = (
                 f"epoch={epoch} step={step}/{len(loader)} loss={metrics['loss']:.4f} "
                 f"acc={metrics['token_acc']:.3f} dx={metrics['dx_acc']:.3f} "
                 f"dy={metrics['dy_acc']:.3f} pen={metrics['pen_acc']:.3f}"
+            )
+            print(line, flush=True)
+            append_jsonl(
+                step_log_path,
+                {
+                    "epoch": epoch,
+                    "step": step,
+                    "total_steps": len(loader),
+                    "split": "train",
+                    **metrics,
+                },
             )
     return average(totals, counts)
 
@@ -154,25 +172,52 @@ def main() -> None:
     model = TextConditionedGeometryActionModel(cfg, text_encoder_dir=args.text_encoder_dir, max_text_len=args.max_text_len).to(device)
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=args.weight_decay)
 
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    step_log_path = output_dir / "step_metrics.jsonl"
+    epoch_log_path = output_dir / "epoch_metrics.jsonl"
+
     print(
         f"device={device} train={train_size} val={val_size} vocab={action_tokenizer.vocab_size} "
-        f"decoder_params={sum(p.numel() for p in model.decoder.parameters()):,}"
+        f"decoder_params={sum(p.numel() for p in model.decoder.parameters()):,} "
+        f"step_log={step_log_path} epoch_log={epoch_log_path}",
+        flush=True,
     )
     best_val = float("inf")
-    output_dir = Path(args.output_dir)
     for epoch in range(1, args.epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device, args, action_tokenizer, epoch)
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            args,
+            action_tokenizer,
+            epoch,
+            step_log_path,
+        )
         val_metrics = evaluate(model, val_loader, device, action_tokenizer)
-        print(
+        epoch_line = (
             f"epoch={epoch} train_loss={train_metrics['loss']:.4f} val_loss={val_metrics['loss']:.4f} "
             f"val_acc={val_metrics['token_acc']:.3f} val_dx={val_metrics['dx_acc']:.3f} "
             f"val_dy={val_metrics['dy_acc']:.3f} val_pen={val_metrics['pen_acc']:.3f}"
         )
-        if val_metrics["loss"] < best_val:
+        print(epoch_line, flush=True)
+        is_best = val_metrics["loss"] < best_val
+        append_jsonl(
+            epoch_log_path,
+            {
+                "epoch": epoch,
+                "train": train_metrics,
+                "val": val_metrics,
+                "best_val_loss_before_update": best_val if math.isfinite(best_val) else None,
+                "is_best": is_best,
+            },
+        )
+        if is_best:
             best_val = val_metrics["loss"]
             save_checkpoint(output_dir, model, action_tokenizer, args, epoch)
 
-    print(f"saved best checkpoint to {output_dir / 'checkpoint.pt'}")
+    print(f"saved best checkpoint to {output_dir / 'checkpoint.pt'}", flush=True)
 
 
 if __name__ == "__main__":
