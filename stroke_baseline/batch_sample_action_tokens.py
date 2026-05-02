@@ -38,12 +38,13 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default="runs/stroke_action_tokens_chinese_mvp/checkpoint.pt")
     parser.add_argument("--output-dir", type=str, default="runs/stroke_action_tokens_chinese_mvp/samples")
     parser.add_argument("--max-steps", type=int, default=64)
+    parser.add_argument("--text-encoder-dir", type=str, default=None)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer = load_model(args.checkpoint, device)
+    model, tokenizer = load_model(args.checkpoint, device, text_encoder_dir=args.text_encoder_dir)
 
     summary = []
     for idx, prompt in enumerate(DEFAULT_PROMPTS, start=1):
