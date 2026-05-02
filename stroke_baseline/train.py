@@ -62,7 +62,7 @@ def main() -> None:
     parser.add_argument("--data", type=str, default="generated_data/raw/expanded_shapes_easy_20260403_103355.jsonl")
     parser.add_argument("--output-dir", type=str, default="runs/stroke_baseline")
     parser.add_argument("--tokenizer-type", choices=["hf", "char"], default="hf")
-    parser.add_argument("--tokenizer-name", type=str, default="google-bert/bert-base-chinese")
+    parser.add_argument("--tokenizer-name", type=str, default="models/bert-base-chinese")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
