@@ -10,14 +10,15 @@ from .pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR
 from .visualize import save_strokes_png
 
 
-def load_model(checkpoint_path: str | Path, device: torch.device):
+def load_model(checkpoint_path: str | Path, device: torch.device, text_encoder_dir: str | None = None):
     checkpoint_path = Path(checkpoint_path)
     state = torch.load(checkpoint_path, map_location=device)
     tokenizer = StrokeActionTokenizer(ActionTokenizerConfig(**state["action_tokenizer_cfg"]))
     cfg = ActionDecoderConfig(**state["decoder_cfg"])
+    enc_dir = text_encoder_dir or state.get("text_encoder_dir", str(DEFAULT_TEXT_ENCODER_DIR))
     model = TextConditionedActionModel(
         cfg,
-        text_encoder_dir=state.get("text_encoder_dir", str(DEFAULT_TEXT_ENCODER_DIR)),
+        text_encoder_dir=enc_dir,
         max_text_len=state["max_text_len"],
     )
     model.decoder.load_state_dict(state["decoder"])
@@ -73,10 +74,11 @@ def main() -> None:
     parser.add_argument("--prompt", type=str, required=True)
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--png", type=str, default=None)
+    parser.add_argument("--text-encoder-dir", type=str, default=None)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer = load_model(args.checkpoint, device)
+    model, tokenizer = load_model(args.checkpoint, device, text_encoder_dir=args.text_encoder_dir)
     tokens = generate_tokens(model, tokenizer, args.prompt, max_steps=args.max_steps, device=device)
     strokes = tokenizer.decode_tokens(tokens)
     print(json.dumps({"prompt": args.prompt, "tokens": tokens, "strokes": strokes}, indent=2, ensure_ascii=False))

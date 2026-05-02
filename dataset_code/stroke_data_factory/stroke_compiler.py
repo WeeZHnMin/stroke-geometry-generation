@@ -2,11 +2,16 @@ from typing import List, Tuple
 
 from .constants import DRAW, END_ALL, END_SHAPE, MOVE
 from .schema import Point, ShapeSample, StrokeStep
+from .utils import resample_dense
 
 
-def shape_to_strokes(points: List[Point], start_from: Point, closed: bool = True) -> Tuple[List[StrokeStep], Point]:
+def shape_to_strokes(points: List[Point], start_from: Point, closed: bool = True, dense: bool = True) -> Tuple[List[StrokeStep], Point]:
+    """Convert shape points to stroke steps. If dense=True, interpolates sparse vertices."""
+    if dense:
+        points = resample_dense(points, closed)
+
     steps: List[StrokeStep] = []
-    if closed and (points[0].x != points[-1].x or points[0].y != points[-1].y):
+    if closed and (abs(points[0].x - points[-1].x) > 1e-9 or abs(points[0].y - points[-1].y) > 1e-9):
         work = points + [points[0]]
     else:
         work = points

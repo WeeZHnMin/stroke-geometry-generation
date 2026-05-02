@@ -62,3 +62,24 @@ def scale_shape(shape: ShapeSample, scale_x: float, scale_y: float) -> ShapeSamp
         bbox=bbox,
         closed=shape.closed,
     )
+
+
+def resample_dense(points: List[Point], closed: bool, step: float = 0.015) -> List[Point]:
+    """Interpolate sparse vertices into dense evenly-spaced points for smooth strokes."""
+    if len(points) < 2:
+        return points
+
+    if closed:
+        segments = list(zip(points, points[1:] + [points[0]]))
+    else:
+        segments = list(zip(points[:-1], points[1:]))
+
+    result: List[Point] = []
+    for a, b in segments:
+        dist = math.hypot(b.x - a.x, b.y - a.y)
+        n = max(1, int(dist / step))
+        for i in range(n):
+            t = i / n
+            result.append(Point(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+
+    return result
