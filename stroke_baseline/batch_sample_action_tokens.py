@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from .sample_action_tokens import generate_tokens, load_model
+from .sample_action_tokens import generate_tokens, generate_two_stage, load_model
 from .visualize import save_strokes_png
 
 
@@ -39,6 +39,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=str, default="runs/stroke_action_tokens_chinese_mvp/samples")
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--text-encoder-dir", type=str, default=None)
+    parser.add_argument("--two-stage", action="store_true", help="双阶段推理模式")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -48,8 +49,11 @@ def main() -> None:
 
     summary = []
     for idx, prompt in enumerate(DEFAULT_PROMPTS, start=1):
-        tokens = generate_tokens(model, tokenizer, prompt, max_steps=args.max_steps, device=device)
-        strokes = tokenizer.decode_tokens(tokens)
+        if args.two_stage:
+            strokes = generate_two_stage(model, tokenizer, prompt, max_steps=args.max_steps, device=device)
+        else:
+            tokens = generate_tokens(model, tokenizer, prompt, max_steps=args.max_steps, device=device)
+            strokes = tokenizer.decode_tokens(tokens)
         stem = f"{idx:02d}_{safe_name(prompt)}"
         png_path = output_dir / f"{stem}.png"
         json_path = output_dir / f"{stem}.json"

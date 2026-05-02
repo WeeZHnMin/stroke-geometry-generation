@@ -224,6 +224,8 @@ class TextConditionedActionModel(nn.Module):
             self.context_proj = nn.Linear(self.text_encoder.hidden_size, decoder_cfg.d_model)
         else:
             self.context_proj = nn.Identity()
+        # 双阶段: 回归预测绝对起点位置
+        self.start_head = nn.Linear(decoder_cfg.d_model, 2)
 
     def encode_text(self, prompts: list[str]) -> dict[str, torch.Tensor]:
         text = self.text_encoder(prompts=prompts, max_text_len=self.max_text_len)
@@ -236,12 +238,19 @@ class TextConditionedActionModel(nn.Module):
         target_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         text = self.encode_text(prompts)
-        return self.decoder(
+        # 从编码器输出中预测起点位置
+        start_pred = self.start_head(text["context"][:, 0, :])  # [B, 2]
+        dec_out = self.decoder(
             context=text["context"],
             context_mask=text["context_mask"],
             decoder_input_ids=decoder_input_ids,
             target_mask=target_mask,
         )
+        return {"start_pred": start_pred, **dec_out}
+
+    def predict_start(self, prompts: list[str]) -> torch.Tensor:
+        text = self.encode_text(prompts)
+        return self.start_head(text["context"][:, 0, :])  # [B, 2]
 
     def decode_step(
         self,
