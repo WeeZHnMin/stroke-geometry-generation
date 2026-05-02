@@ -1,4 +1,3 @@
-import math
 from dataclasses import asdict, dataclass
 
 import torch
@@ -11,11 +10,6 @@ class ActionTokenizerConfig:
     bins: int = 512
     min_value: float = -1.0
     max_value: float = 1.0
-    warp_exponent: float = 0.5
-    """非均匀分桶的扭曲指数。
-       = 1.0 → 均匀分桶（原始行为）
-       = 0.5 → 平方根扭曲，0附近更密（推荐）
-       < 1.0 → 小值精度更高，大值精度降低"""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -46,35 +40,16 @@ class StrokeActionTokenizer:
         self.pad_id = self.start_id + 1
         self.vocab_size = self.pad_id + 1
 
-    # ── 非均匀扭曲映射 ─────────────────────────────────────
-    # warp_exponent < 1.0 → 0 附近被拉伸（精度更高），远处被压缩
-    # e.g. warp_exponent=0.5 (sqrt) → dx=0.015 映射到 warp≈0.122，占更多 bin
-    def _warp(self, x: float) -> float:
-        exp = self.cfg.warp_exponent
-        return math.copysign(abs(x) ** exp, x)
-
-    def _unwarp(self, y: float) -> float:
-        exp = self.cfg.warp_exponent
-        return math.copysign(abs(y) ** (1.0 / exp), y)
-
     def _value_to_bin(self, value: float) -> int:
         value = max(self.cfg.min_value, min(self.cfg.max_value, float(value)))
-        # 在扭曲空间中做均匀量化
-        w = self._warp(value)
-        w_min = self._warp(self.cfg.min_value)
-        w_max = self._warp(self.cfg.max_value)
-        scale = (w - w_min) / (w_max - w_min)
+        scale = (value - self.cfg.min_value) / (self.cfg.max_value - self.cfg.min_value)
         idx = int(round(scale * (self.bins - 1)))
         return max(0, min(self.bins - 1, idx))
 
     def _bin_to_value(self, idx: int) -> float:
         idx = max(0, min(self.bins - 1, int(idx)))
         scale = idx / max(self.bins - 1, 1)
-        # 从扭曲空间映射回原始空间
-        w_min = self._warp(self.cfg.min_value)
-        w_max = self._warp(self.cfg.max_value)
-        w = w_min + scale * (w_max - w_min)
-        return self._unwarp(w)
+        return self.cfg.min_value + scale * (self.cfg.max_value - self.cfg.min_value)
 
     def encode_step(self, dx: float, dy: float, pen_state: str) -> list[int]:
         return [
