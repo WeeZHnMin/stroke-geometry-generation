@@ -11,8 +11,8 @@ class StrokeTransformerConfig:
     vocab_size: int
     max_text_len: int = 96
     max_stroke_len: int = 128
-    d_model: int = 128
-    n_heads: int = 4
+    d_model: int = 256
+    n_heads: int = 8
     num_encoder_layers: int = 2
     num_decoder_layers: int = 3
     ff_mult: int = 4

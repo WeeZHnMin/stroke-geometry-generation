@@ -8,15 +8,13 @@ from transformers import AutoModel, AutoTokenizer
 from .dataset import NUM_INPUT_PEN_STATES, NUM_TARGET_PEN_STATES
 
 
-DEFAULT_TEXT_ENCODER_DIR = (
-    Path(__file__).resolve().parents[1] / "models" / "chinese_roberta_L-2_H-128"
-)
+DEFAULT_TEXT_ENCODER_DIR = str(Path(__file__).resolve().parents[1] / "models" / "bert-base-chinese")
 
 
 @dataclass
 class StrokeDecoderConfig:
-    d_model: int = 128
-    n_heads: int = 4
+    d_model: int = 256
+    n_heads: int = 8
     num_decoder_layers: int = 3
     ff_mult: int = 4
     dropout: float = 0.1
@@ -31,7 +29,7 @@ class FrozenChineseTextEncoder(nn.Module):
 
     def __init__(self, model_dir: str | Path = DEFAULT_TEXT_ENCODER_DIR):
         super().__init__()
-        self.model_dir = Path(model_dir)
+        self.model_dir = str(model_dir)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir, use_fast=True)
         self.encoder = AutoModel.from_pretrained(self.model_dir)
 
