@@ -77,9 +77,12 @@ def resample_dense(points: List[Point], closed: bool, step: float = 0.015) -> Li
     result: List[Point] = []
     for a, b in segments:
         dist = math.hypot(b.x - a.x, b.y - a.y)
-        n = max(1, int(dist / step))
+        n = max(1, math.ceil(dist / step))
         for i in range(n):
             t = i / n
             result.append(Point(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+
+    if not closed:
+        result.append(points[-1])
 
     return result

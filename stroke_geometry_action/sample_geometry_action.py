@@ -69,7 +69,7 @@ def generate_tokens(
     model: TextConditionedGeometryActionModel,
     tokenizer: StrokeActionTokenizer,
     prompt: str,
-    max_steps: int = 64,
+    max_steps: int = 170,
     device: torch.device | str = "cpu",
 ) -> list[int]:
     text = model.encode_text([prompt])
@@ -140,7 +140,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sample from geometry-state-conditioned action-token stroke model.")
     parser.add_argument("--checkpoint", type=str, default="runs/stroke_geometry_action_chinese_mvp/checkpoint.pt")
     parser.add_argument("--prompt", type=str, required=True)
-    parser.add_argument("--max-steps", type=int, default=64)
+    parser.add_argument("--max-steps", type=int, default=170)
     parser.add_argument("--png", type=str, default=None)
     args = parser.parse_args()
 

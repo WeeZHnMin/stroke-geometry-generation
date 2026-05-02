@@ -25,7 +25,7 @@ class StrokeDecoderConfig:
 
 
 class FrozenChineseTextEncoder(nn.Module):
-    """Local Chinese RoBERTa tiny encoder used as the text condition source."""
+    """Local bert-base-chinese encoder used as the text condition source."""
 
     def __init__(self, model_dir: str | Path = DEFAULT_TEXT_ENCODER_DIR):
         super().__init__()

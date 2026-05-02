@@ -53,15 +53,22 @@ def strokes_to_path(strokes: list[dict]) -> list[dict]:
     return path
 
 
-def plot_single_path(ax, path: list[dict], prompt: str, show_details: bool = True) -> None:
+def plot_single_path(ax, path: list[dict], prompt: str, show_details: bool = True, canvas_size: float = 0.0) -> None:
     """在 Axes 上绘制一条完整的笔画路径。"""
     xs = [p["x"] for p in path]
     ys = [p["y"] for p in path]
 
     # 画背景网格
     ax.grid(True, alpha=0.15)
-    ax.set_xlim(-0.05, 1.05)
-    ax.set_ylim(1.05, -0.05)
+    if canvas_size > 0:
+        pad = canvas_size * 0.04
+        ax.set_xlim(-pad, canvas_size + pad)
+        ax.set_ylim(canvas_size + pad, -pad)
+    else:
+        span = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        pad = span * 0.08
+        ax.set_xlim(min(xs) - pad, max(xs) + pad)
+        ax.set_ylim(max(ys) + pad, min(ys) - pad)
     ax.set_aspect("equal")
 
     # 标注原点
@@ -121,11 +128,12 @@ def render_single(samples: list[dict], idx: int, save_dir: Path) -> None:
     """渲染单条样本的笔画路径图。"""
     sample = samples[idx]
     path = strokes_to_path(sample["strokes"])
+    canvas_size = float(sample.get("metadata", {}).get("canvas_size", sample.get("scene_spec", {}).get("canvas_size", 0.0)) or 0.0)
 
     fig, ax = plt.subplots(figsize=(5.5, 5.5))
     # 判断是否显示详细标注（步数少的显示）
     show_details = len(path) <= 15
-    plot_single_path(ax, path, sample["prompt"], show_details=show_details)
+    plot_single_path(ax, path, sample["prompt"], show_details=show_details, canvas_size=canvas_size)
 
     # 信息框
     n_steps = len(sample["strokes"])
@@ -151,7 +159,8 @@ def render_grid(samples: list[dict], rows: int, cols: int, save_dir: Path) -> No
     for i in range(n):
         ax = axes_flat[i]
         path = strokes_to_path(samples[i]["strokes"])
-        plot_single_path(ax, path, samples[i]["prompt"], show_details=False)
+        canvas_size = float(samples[i].get("metadata", {}).get("canvas_size", samples[i].get("scene_spec", {}).get("canvas_size", 0.0)) or 0.0)
+        plot_single_path(ax, path, samples[i]["prompt"], show_details=False, canvas_size=canvas_size)
         ax.text(0.98, 0.02, f"#{i}", transform=ax.transAxes, fontsize=8,
                 ha="right", va="bottom", color="gray", alpha=0.7)
 

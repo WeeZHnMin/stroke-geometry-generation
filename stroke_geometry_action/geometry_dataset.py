@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from torch.utils.data import Dataset
 
+from stroke_baseline.action_dataset import _decoder_input_with_end_padding, _effective_action_len
 from stroke_baseline.action_tokenizer import ActionTokenizerConfig, StrokeActionTokenizer
 from stroke_baseline.dataset import read_jsonl
 
@@ -117,7 +118,7 @@ class GeometryActionTokenJsonlDataset(Dataset):
         if not self.raw_samples:
             raise ValueError(f"No samples found in {path}")
         self.action_tokenizer = action_tokenizer or StrokeActionTokenizer(ActionTokenizerConfig())
-        self.max_action_len = max_action_len
+        self.max_action_len = _effective_action_len(max_action_len)
 
     def __len__(self) -> int:
         return len(self.raw_samples)
@@ -129,7 +130,7 @@ class GeometryActionTokenJsonlDataset(Dataset):
         seq_len = min(len(tokens), self.max_action_len)
         actual = torch.tensor(tokens[:seq_len], dtype=torch.long)
 
-        decoder_input = torch.full((self.max_action_len,), self.action_tokenizer.pad_id, dtype=torch.long)
+        decoder_input = _decoder_input_with_end_padding(self.action_tokenizer, self.max_action_len)
         target = torch.full((self.max_action_len,), -100, dtype=torch.long)
         target_mask = torch.zeros(self.max_action_len, dtype=torch.bool)
 
@@ -148,4 +149,3 @@ class GeometryActionTokenJsonlDataset(Dataset):
             "target_mask": target_mask,
             "length": torch.tensor(seq_len, dtype=torch.long),
         }
-

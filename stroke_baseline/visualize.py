@@ -37,8 +37,16 @@ def save_strokes_png(strokes: Sequence[dict], path: str | Path, title: str | Non
             prev = (x, y)
 
     ax.set_aspect("equal", adjustable="box")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(1, 0)
+    if points:
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        span = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        pad = span * 0.08
+        ax.set_xlim(min(xs) - pad, max(xs) + pad)
+        ax.set_ylim(max(ys) + pad, min(ys) - pad)
+    else:
+        ax.set_xlim(0, 1)
+        ax.set_ylim(1, 0)
     ax.grid(True, alpha=0.2)
     if title:
         ax.set_title(title)

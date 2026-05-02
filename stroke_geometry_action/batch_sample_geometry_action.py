@@ -40,7 +40,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Batch sample Chinese prompts from geometry-action model.")
     parser.add_argument("--checkpoint", type=str, default="runs/stroke_geometry_action_chinese_mvp/checkpoint.pt")
     parser.add_argument("--output-dir", type=str, default="runs/stroke_geometry_action_chinese_mvp/samples")
-    parser.add_argument("--max-steps", type=int, default=64)
+    parser.add_argument("--max-steps", type=int, default=170)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)

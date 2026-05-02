@@ -44,14 +44,14 @@ def strokes_to_segments(strokes: list[dict]) -> list[list[tuple[float, float]]]:
 
     for step in strokes:
         pen = step["pen_state"]
+        nx = x + float(step["dx"])
+        ny = y + float(step["dy"])
         if pen == "move":
             if current:
                 segments.append(current)
                 current = []
-            x, y = float(step["dx"]), float(step["dy"])
+            x, y = nx, ny
         else:
-            nx = x + float(step["dx"])
-            ny = y + float(step["dy"])
             if pen == "draw":
                 current.append(((x, y), (nx, ny)))
             elif pen == "end_shape" or pen == "end_all":
@@ -70,8 +70,11 @@ def draw_sample_on_ax(ax, sample: dict, show_title: bool = True) -> None:
     """在 matplotlib Axes 上绘制一个样本的笔画。"""
     strokes = sample["strokes"]
     prompt = sample["prompt"]
+    canvas_size = float(sample.get("metadata", {}).get("canvas_size", sample.get("scene_spec", {}).get("canvas_size", 0.0)) or 0.0)
 
     segments = strokes_to_segments(strokes)
+    xs: list[float] = [0.0]
+    ys: list[float] = [0.0]
 
     # 为不同 shape 分配不同颜色
     colors = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"]
@@ -82,9 +85,18 @@ def draw_sample_on_ax(ax, sample: dict, show_title: bool = True) -> None:
         color_idx += 1
         for (x1, y1), (x2, y2) in seg:
             ax.plot([x1, x2], [y1, y2], color=color, linewidth=2.5, solid_capstyle="round")
+            xs.extend([x1, x2])
+            ys.extend([y1, y2])
 
-    ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(1.02, -0.02)
+    if canvas_size > 0:
+        pad = canvas_size * 0.04
+        ax.set_xlim(-pad, canvas_size + pad)
+        ax.set_ylim(canvas_size + pad, -pad)
+    else:
+        span = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        pad = span * 0.08
+        ax.set_xlim(min(xs) - pad, max(xs) + pad)
+        ax.set_ylim(max(ys) + pad, min(ys) - pad)
     ax.set_aspect("equal")
     ax.axis("off")
 

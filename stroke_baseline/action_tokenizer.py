@@ -7,12 +7,12 @@ from .dataset import ID_TO_PEN, PEN_TO_ID
 
 @dataclass
 class ActionTokenizerConfig:
-    bins: int = 512
-    min_value: float = -1.0
-    max_value: float = 1.0
-    draw_min_value: float = -0.05
-    draw_max_value: float = 0.05
-    """draw 步专用的更小量化范围，让 tiny 位移获得更多 bin。"""
+    bins: int = 500
+    min_value: float = -0.5
+    max_value: float = 0.5
+    draw_min_value: float = -0.5
+    draw_max_value: float = 0.5
+    """Quantize dx/dy into 500 bins over [-0.5, 0.5] by default."""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,6 +77,10 @@ class StrokeActionTokenizer:
             self.dy_offset + self._value_to_bin(dy),
             self.pen_offset + PEN_TO_ID[pen_state],
         ]
+
+    def end_padding_step(self) -> list[int]:
+        """A legal no-op action used to fill decoder input padding slots."""
+        return self.encode_step(0.0, 0.0, "end_all")
 
     def decode_step(self, dx_token: int, dy_token: int, pen_token: int) -> dict:
         dx_bin = int(dx_token) - self.dx_offset

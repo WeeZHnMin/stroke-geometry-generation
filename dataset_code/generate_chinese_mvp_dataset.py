@@ -6,7 +6,9 @@ from pathlib import Path
 
 from stroke_data_factory.geometry_builder import build_shape_from_type
 from stroke_data_factory.metadata_annotator import annotate_metadata
+from stroke_data_factory.schema import Point, ShapeSample
 from stroke_data_factory.stroke_compiler import compile_strokes
+from stroke_data_factory.utils import polygon_bbox
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -38,18 +40,19 @@ SHAPE_ZH = {
 }
 
 
-def size_zh(bbox: dict[str, float]) -> str:
+def size_zh(bbox: dict[str, float], canvas_size: float) -> str:
     span = max(bbox["x_max"] - bbox["x_min"], bbox["y_max"] - bbox["y_min"])
-    if span < 0.18:
+    norm_span = span / canvas_size
+    if norm_span < 0.18:
         return "小"
-    if span < 0.30:
+    if norm_span < 0.30:
         return "中等"
     return "大"
 
 
-def position_zh(bbox: dict[str, float]) -> str:
-    cx = (bbox["x_min"] + bbox["x_max"]) / 2
-    cy = (bbox["y_min"] + bbox["y_max"]) / 2
+def position_zh(bbox: dict[str, float], canvas_size: float) -> str:
+    cx = ((bbox["x_min"] + bbox["x_max"]) / 2) / canvas_size
+    cy = ((bbox["y_min"] + bbox["y_max"]) / 2) / canvas_size
     horiz = "左边" if cx < 0.35 else "右边" if cx > 0.65 else "中间"
     vert = "上方" if cy < 0.35 else "下方" if cy > 0.65 else "中部"
 
@@ -62,10 +65,10 @@ def position_zh(bbox: dict[str, float]) -> str:
     return f"画布{vert}{horiz}"
 
 
-def make_chinese_prompt(shape_type: str, bbox: dict[str, float], rng: random.Random) -> str:
+def make_chinese_prompt(shape_type: str, bbox: dict[str, float], rng: random.Random, canvas_size: float) -> str:
     shape = SHAPE_ZH[shape_type]
-    size = size_zh(bbox)
-    position = position_zh(bbox)
+    size = size_zh(bbox, canvas_size)
+    position = position_zh(bbox, canvas_size)
     templates = [
         f"画一个{size}{shape}，位置在{position}",
         f"在{position}画一个{size}{shape}",
@@ -74,10 +77,26 @@ def make_chinese_prompt(shape_type: str, bbox: dict[str, float], rng: random.Ran
     return rng.choice(templates)
 
 
-def sample_chinese_scene(rng: random.Random, shape_types: list[str]) -> dict:
+def scale_shape_to_canvas(shape: ShapeSample, canvas_size: float) -> ShapeSample:
+    points = [Point(p.x * canvas_size, p.y * canvas_size) for p in shape.points]
+    return ShapeSample(
+        shape_type=shape.shape_type,
+        points=points,
+        prompt_fragment=shape.prompt_fragment,
+        bbox=polygon_bbox(points),
+        closed=shape.closed,
+    )
+
+
+def sample_chinese_scene(
+    rng: random.Random,
+    shape_types: list[str],
+    canvas_size: float = 6.0,
+    dense_step: float = 0.1,
+) -> dict:
     shape_type = rng.choice(shape_types)
-    shape = build_shape_from_type(shape_type, rng)
-    strokes = compile_strokes([shape])
+    shape = scale_shape_to_canvas(build_shape_from_type(shape_type, rng), canvas_size)
+    strokes = compile_strokes([shape], dense_step=dense_step)
     scene_spec = {
         "scene_type": "single_basic_chinese_mvp",
         "difficulty": "easy",
@@ -86,8 +105,10 @@ def sample_chinese_scene(rng: random.Random, shape_types: list[str]) -> dict:
         "relation_type": None,
         "anchor_position": None,
         "recipe_name": "chinese_mvp_single_basic",
+        "canvas_size": canvas_size,
+        "dense_step": dense_step,
     }
-    prompt = make_chinese_prompt(shape.shape_type, shape.bbox, rng)
+    prompt = make_chinese_prompt(shape.shape_type, shape.bbox, rng, canvas_size)
     metadata = annotate_metadata(
         {**scene_spec, "scene_type": "single_basic"},
         [shape],
@@ -96,6 +117,8 @@ def sample_chinese_scene(rng: random.Random, shape_types: list[str]) -> dict:
     metadata["scene_type"] = scene_spec["scene_type"]
     metadata["prompt_language"] = "zh"
     metadata["mvp_family"] = "single_basic_convergence"
+    metadata["canvas_size"] = canvas_size
+    metadata["dense_step"] = dense_step
 
     return {
         "scene_spec": scene_spec,
@@ -129,6 +152,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--shapes", type=str, default=",".join(DEFAULT_SHAPES))
+    parser.add_argument("--canvas-size", type=float, default=6.0)
+    parser.add_argument("--dense-step", type=float, default=0.1)
     args = parser.parse_args()
 
     shape_types = [s.strip() for s in args.shapes.split(",") if s.strip()]
@@ -137,7 +162,10 @@ def main() -> None:
         raise ValueError(f"unsupported shapes for Chinese MVP: {unknown}")
 
     rng = random.Random(args.seed)
-    samples = [sample_chinese_scene(rng, shape_types) for _ in range(args.num_samples)]
+    samples = [
+        sample_chinese_scene(rng, shape_types, canvas_size=args.canvas_size, dense_step=args.dense_step)
+        for _ in range(args.num_samples)
+    ]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output = Path(args.output) if args.output else OUTPUT_DIR / f"chinese_mvp_single_basic_{timestamp}.jsonl"
     save_jsonl(samples, output)

@@ -42,7 +42,7 @@ def generate_tokens(
     model: TextConditionedActionModel,
     tokenizer: StrokeActionTokenizer,
     prompt: str,
-    max_steps: int = 64,
+    max_steps: int = 170,
     device: torch.device | str = "cpu",
 ) -> list[int]:
     """单阶段推理: 自回归预测所有步骤（含第一步 move）。"""
@@ -77,7 +77,7 @@ def generate_two_stage(
     model: TextConditionedActionModel,
     tokenizer: StrokeActionTokenizer,
     prompt: str,
-    max_steps: int = 64,
+    max_steps: int = 170,
     device: torch.device | str = "cpu",
 ) -> list[dict]:
     """双阶段推理:
@@ -125,7 +125,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sample from OpenVLA-style action-token stroke model.")
     parser.add_argument("--checkpoint", type=str, default="runs/stroke_action_tokens_easy/checkpoint.pt")
     parser.add_argument("--prompt", type=str, required=True)
-    parser.add_argument("--max-steps", type=int, default=64)
+    parser.add_argument("--max-steps", type=int, default=170)
     parser.add_argument("--png", type=str, default=None)
     parser.add_argument("--text-encoder-dir", type=str, default=None)
     parser.add_argument("--two-stage", action="store_true", help="双阶段推理模式")

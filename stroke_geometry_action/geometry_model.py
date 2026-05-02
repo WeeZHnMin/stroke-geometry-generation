@@ -13,7 +13,7 @@ from stroke_baseline.pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR,
 from .geometry_dataset import GEOMETRY_STATE_DIM
 
 
-DEFAULT_GEOMETRY_ACTION_BINS = 512
+DEFAULT_GEOMETRY_ACTION_BINS = 500
 
 
 @dataclass
