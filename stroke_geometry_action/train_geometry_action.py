@@ -135,7 +135,7 @@ def main() -> None:
     parser.add_argument("--max-value", type=float, default=1.0)
     parser.add_argument("--max-text-len", type=int, default=64)
     parser.add_argument("--max-action-len", type=int, default=384)
-    parser.add_argument("--d-model", type=int, default=256)
+    parser.add_argument("--d-model", type=int, default=384)
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--decoder-layers", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.1)

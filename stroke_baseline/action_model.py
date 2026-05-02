@@ -17,7 +17,7 @@ from .pretrained_encoder_decoder import (
 class ActionDecoderConfig:
     action_vocab_size: int
     pad_token_id: int
-    d_model: int = 256
+    d_model: int = 384
     n_heads: int = 8
     num_decoder_layers: int = 3
     ff_mult: int = 4

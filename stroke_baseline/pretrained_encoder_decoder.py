@@ -13,7 +13,7 @@ DEFAULT_TEXT_ENCODER_DIR = str(Path(__file__).resolve().parents[1] / "models" / 
 
 @dataclass
 class StrokeDecoderConfig:
-    d_model: int = 256
+    d_model: int = 384
     n_heads: int = 8
     num_decoder_layers: int = 3
     ff_mult: int = 4

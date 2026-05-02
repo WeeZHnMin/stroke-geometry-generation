@@ -7,7 +7,7 @@ from .dataset import ID_TO_PEN, PEN_TO_ID
 
 @dataclass
 class ActionTokenizerConfig:
-    bins: int = 256
+    bins: int = 512
     min_value: float = -1.0
     max_value: float = 1.0
 
