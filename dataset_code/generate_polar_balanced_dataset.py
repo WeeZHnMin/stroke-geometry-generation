@@ -291,6 +291,34 @@ def actions_to_strokes(actions: list[dict]) -> list[StrokeStep]:
     return [StrokeStep(dx=a["dx"], dy=a["dy"], pen_state=a["pen_state"]) for a in actions]
 
 
+def actions_to_drawn_shape(shape_type: str, actions: list[dict], closed: bool) -> ShapeSample:
+    x = 0.0
+    y = 0.0
+    drawn: list[Point] = []
+    for action in actions:
+        x += float(action["dx"])
+        y += float(action["dy"])
+        if action["pen_state"] != "move":
+            drawn.append(Point(x, y))
+
+    if closed and len(drawn) > 1:
+        first = drawn[0]
+        last = drawn[-1]
+        if math.hypot(last.x - first.x, last.y - first.y) < 1e-6:
+            drawn = drawn[:-1]
+
+    if not drawn:
+        drawn = [Point(x, y)]
+
+    return ShapeSample(
+        shape_type=shape_type,
+        points=drawn,
+        prompt_fragment=SHAPE_ZH[shape_type],
+        bbox=polygon_bbox(drawn),
+        closed=False,
+    )
+
+
 def make_prompt(shape_type: str, size_name: str, position_name: str, rng: random.Random) -> str:
     shape = SHAPE_ZH[shape_type]
     size = SIZE_ZH[size_name]
@@ -331,6 +359,7 @@ def make_sample(
     if actions is None:
         return None
 
+    token_shape = actions_to_drawn_shape(shape_type, actions, shape.closed)
     tokens = [tokenizer.encode_action(a["distance_id"], a["theta_id"], a["pen_state"]) for a in actions]
     strokes = actions_to_strokes(actions)
     prompt = make_prompt(shape_type, size_name, position_name, rng)
@@ -347,7 +376,7 @@ def make_sample(
         "min_remainder": min_remainder,
         "max_move_steps": max_move_steps,
     }
-    metadata = annotate_metadata({**scene_spec, "scene_type": "single_basic"}, [shape], strokes)
+    metadata = annotate_metadata({**scene_spec, "scene_type": "single_basic"}, [token_shape], strokes)
     metadata.update(
         {
             "scene_type": scene_spec["scene_type"],
@@ -373,9 +402,9 @@ def make_sample(
             {
                 "shape_type": shape.shape_type,
                 "prompt_fragment": prompt,
-                "points": [asdict(p) for p in shape.points],
-                "bbox": shape.bbox,
-                "closed": shape.closed,
+                "points": [asdict(p) for p in token_shape.points],
+                "bbox": token_shape.bbox,
+                "closed": token_shape.closed,
             }
         ],
         "polar_actions": actions,
