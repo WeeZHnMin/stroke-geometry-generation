@@ -240,6 +240,103 @@ def append_segment(
     return None
 
 
+def append_fixed_polar_steps(
+    actions: list[dict],
+    distance_id: int,
+    theta_id: int,
+    count: int,
+    pen_state: str,
+    tokenizer: PolarActionTokenizer,
+) -> Point:
+    theta = 2 * math.pi * theta_id / tokenizer.theta_bins
+    distance = tokenizer.distance_buckets[distance_id]
+    dx = distance * math.cos(theta)
+    dy = distance * math.sin(theta)
+    for _ in range(count):
+        actions.append(
+            {
+                "distance_id": distance_id,
+                "distance": distance,
+                "theta_id": theta_id,
+                "theta": theta,
+                "pen_state": pen_state,
+                "dx": dx,
+                "dy": dy,
+            }
+        )
+    return Point(dx * count, dy * count)
+
+
+def append_axis_aligned_delta(
+    actions: list[dict],
+    dx_total: float,
+    dy_total: float,
+    pen_state: str,
+    tokenizer: PolarActionTokenizer,
+    distance_id: int,
+) -> Point:
+    if abs(dx_total) > 1e-9 and abs(dy_total) > 1e-9:
+        raise ValueError("axis-aligned delta must have only one non-zero component")
+    distance = tokenizer.distance_buckets[distance_id]
+    amount = dx_total if abs(dx_total) > 1e-9 else dy_total
+    count = int(round(abs(amount) / distance))
+    if count <= 0:
+        return Point(0.0, 0.0)
+
+    if dx_total > 0:
+        theta_id = 0
+    elif dx_total < 0:
+        theta_id = tokenizer.theta_bins // 2
+    elif dy_total > 0:
+        theta_id = tokenizer.theta_bins // 4
+    else:
+        theta_id = tokenizer.theta_bins * 3 // 4
+    return append_fixed_polar_steps(actions, distance_id, theta_id, count, pen_state, tokenizer)
+
+
+def build_axis_aligned_rectangle_actions(
+    shape: ShapeSample,
+    tokenizer: PolarActionTokenizer,
+    draw_distance_ids: list[int],
+    move_distance_ids: list[int],
+    min_remainder: float,
+    max_move_steps: int,
+) -> list[dict] | None:
+    points = list(shape.points)
+    if len(points) != 4:
+        return None
+
+    actions: list[dict] = []
+    cursor = append_segment(
+        actions,
+        Point(0.0, 0.0),
+        points[0],
+        "move",
+        tokenizer,
+        move_distance_ids,
+        min_remainder,
+        max_move_steps,
+    )
+    if cursor is None:
+        return None
+
+    base_distance_id = min(draw_distance_ids, key=lambda idx: tokenizer.distance_buckets[idx])
+    base_distance = tokenizer.distance_buckets[base_distance_id]
+    width = max(abs(points[1].x - points[0].x), base_distance)
+    height = max(abs(points[2].y - points[1].y), base_distance)
+    width = round(width / base_distance) * base_distance
+    height = round(height / base_distance) * base_distance
+
+    append_axis_aligned_delta(actions, width, 0.0, "draw", tokenizer, base_distance_id)
+    append_axis_aligned_delta(actions, 0.0, height, "draw", tokenizer, base_distance_id)
+    append_axis_aligned_delta(actions, -width, 0.0, "draw", tokenizer, base_distance_id)
+    append_axis_aligned_delta(actions, 0.0, -height, "draw", tokenizer, base_distance_id)
+    if not actions:
+        return None
+    actions[-1]["pen_state"] = "end_all"
+    return actions
+
+
 def build_actions(
     shape: ShapeSample,
     tokenizer: PolarActionTokenizer,
@@ -249,6 +346,16 @@ def build_actions(
     max_move_steps: int,
     max_segment_steps: int,
 ) -> list[dict] | None:
+    if shape.shape_type in {"square", "rectangle", "wide_rectangle", "tall_rectangle"}:
+        return build_axis_aligned_rectangle_actions(
+            shape,
+            tokenizer,
+            draw_distance_ids,
+            move_distance_ids,
+            min_remainder,
+            max_move_steps,
+        )
+
     points = path_points(shape)
     if not points:
         return None

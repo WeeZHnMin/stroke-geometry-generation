@@ -80,7 +80,7 @@ def draw_sample(ax, sample: dict, index: int) -> None:
 
     shape_type = shape.get("shape_type", "unknown")
     prompt = sample.get("prompt", "")
-    num_actions = len(sample.get("action_tokens", []))
+    num_actions = len(sample.get("action_tokens", [])) or len(sample.get("strokes", []))
     ax.set_title(f"#{index} {shape_type} | actions={num_actions}\n{prompt}", fontsize=8)
 
 
