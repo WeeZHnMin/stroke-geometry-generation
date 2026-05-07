@@ -54,6 +54,7 @@ def sample_sequence(
     *,
     prompt: str,
     max_steps: int,
+    canvas_size: float,
     num_train_timesteps: int,
     beta_start: float,
     beta_end: float,
@@ -77,7 +78,7 @@ def sample_sequence(
     for timestep in reversed(range(num_train_timesteps)):
         pred_x0 = predict_x0(model, xt, timestep, prompt, seq_mask)
         pred_x0 = pred_x0.clone()
-        pred_x0[..., :2] = pred_x0[..., :2].clamp(0.0, 1.0)
+        pred_x0[..., :2] = pred_x0[..., :2].clamp(0.0, canvas_size)
         pred_x0[..., 2] = pred_x0[..., 2].clamp(0.0, 2.0)
 
         alpha_t = scheduler.alphas[timestep]
@@ -155,6 +156,7 @@ def main() -> None:
     parser.add_argument("--data", type=str, default=None)
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=128)
+    parser.add_argument("--canvas-size", type=float, default=6.0)
     parser.add_argument("--num-train-timesteps", type=int, default=1000)
     parser.add_argument("--beta-start", type=float, default=1e-4)
     parser.add_argument("--beta-end", type=float, default=0.02)
@@ -177,6 +179,7 @@ def main() -> None:
         model,
         prompt=prompt,
         max_steps=min(args.max_steps, model.cfg.max_seq_len),
+        canvas_size=args.canvas_size,
         num_train_timesteps=args.num_train_timesteps,
         beta_start=args.beta_start,
         beta_end=args.beta_end,

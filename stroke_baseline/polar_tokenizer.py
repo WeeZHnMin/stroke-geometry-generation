@@ -1,5 +1,7 @@
 import math
+import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from .dataset import ID_TO_PEN, PEN_TO_ID
 
@@ -75,3 +77,52 @@ class PolarActionTokenizer:
 
     def end_padding_token(self) -> int:
         return self.encode_action(0, 0, "end_all")
+
+    @classmethod
+    def from_vocab_file(cls, path: str | Path) -> "PolarActionTokenizer":
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        tokens = payload.get("tokens")
+        if not tokens:
+            raise ValueError(f"No tokens found in vocab file: {path}")
+        distance_buckets = tuple(float(v) for v in payload.get("distance_buckets", ()))
+        theta_bins = int(payload.get("theta_bins", 360))
+        if not distance_buckets:
+            raise ValueError(f"Missing distance_buckets in vocab file: {path}")
+        return cls(PolarActionTokenizerConfig(distance_buckets=distance_buckets, theta_bins=theta_bins))
+
+
+class CompactPolarTokenMapper:
+    """Map raw polar action token ids to a compact contiguous vocabulary."""
+
+    def __init__(self, token_ids: list[int]):
+        if not token_ids:
+            raise ValueError("token_ids must not be empty")
+        unique = sorted({int(token_id) for token_id in token_ids})
+        self.raw_token_ids = unique
+        self.raw_to_compact = {token_id: idx for idx, token_id in enumerate(unique)}
+        self.compact_to_raw = {idx: token_id for idx, token_id in enumerate(unique)}
+        self.action_vocab_size = len(unique)
+        self.start_id = self.action_vocab_size
+        self.pad_id = self.action_vocab_size + 1
+        self.vocab_size = self.action_vocab_size + 2
+
+    @classmethod
+    def from_vocab_file(cls, path: str | Path) -> "CompactPolarTokenMapper":
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        tokens = payload.get("tokens")
+        if not tokens:
+            raise ValueError(f"No tokens found in vocab file: {path}")
+        token_ids = [int(item["token_id"]) for item in tokens]
+        return cls(token_ids)
+
+    def encode(self, raw_token_id: int) -> int:
+        try:
+            return self.raw_to_compact[int(raw_token_id)]
+        except KeyError as exc:
+            raise KeyError(f"raw token id {raw_token_id} is not in the observed vocabulary") from exc
+
+    def decode(self, compact_token_id: int) -> int:
+        compact_token_id = int(compact_token_id)
+        if compact_token_id < 0 or compact_token_id >= self.action_vocab_size:
+            raise ValueError(f"token id {compact_token_id} is not a compact action token")
+        return self.compact_to_raw[compact_token_id]

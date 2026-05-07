@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .dataset import read_jsonl
-from .polar_tokenizer import PolarActionTokenizer, PolarActionTokenizerConfig
+from .polar_tokenizer import CompactPolarTokenMapper, PolarActionTokenizer, PolarActionTokenizerConfig
 
 
 def _effective_len(max_action_len: int) -> int:
@@ -19,6 +19,7 @@ class PolarActionJsonlDataset(Dataset):
         self,
         path: str | Path,
         tokenizer: PolarActionTokenizer | None = None,
+        compact_mapper: CompactPolarTokenMapper | None = None,
         max_action_len: int = 192,
         limit: int | None = None,
     ) -> None:
@@ -27,6 +28,7 @@ class PolarActionJsonlDataset(Dataset):
             raise ValueError(f"No samples found in {path}")
 
         self.tokenizer = tokenizer or self._tokenizer_from_sample(self.raw_samples[0])
+        self.compact_mapper = compact_mapper
         self.max_action_len = _effective_len(max_action_len)
 
     @staticmethod
@@ -41,15 +43,23 @@ class PolarActionJsonlDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         raw = self.raw_samples[idx]
-        tokens = [int(t) for t in raw["action_tokens"]]
+        raw_tokens = [int(t) for t in raw["action_tokens"]]
+        if self.compact_mapper is not None:
+            tokens = [self.compact_mapper.encode(token) for token in raw_tokens]
+            start_token = self.compact_mapper.start_id
+            pad_token = self.compact_mapper.pad_id
+        else:
+            tokens = raw_tokens
+            pad_token = self.tokenizer.end_padding_token()
+            start_token = self.tokenizer.start_id
         seq_len = min(len(tokens), self.max_action_len)
         actual = torch.tensor(tokens[:seq_len], dtype=torch.long)
 
-        decoder_input = torch.full((self.max_action_len,), self.tokenizer.end_padding_token(), dtype=torch.long)
+        decoder_input = torch.full((self.max_action_len,), pad_token, dtype=torch.long)
         target = torch.full((self.max_action_len,), -100, dtype=torch.long)
         target_mask = torch.zeros(self.max_action_len, dtype=torch.bool)
 
-        decoder_input[0] = self.tokenizer.start_id
+        decoder_input[0] = start_token
         if seq_len > 1:
             decoder_input[1:seq_len] = actual[:-1]
 

@@ -43,3 +43,5 @@ openvla/
 .DS_Store
 Thumbs.db
 viz_output
+outputs/
+tmp_*.jsonl

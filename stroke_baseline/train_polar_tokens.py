@@ -10,8 +10,10 @@ from torch.utils.data import DataLoader, random_split
 
 from .polar_dataset import PolarActionJsonlDataset
 from .polar_model import PolarDecoderConfig, TextConditionedPolarModel
-from .polar_tokenizer import PolarActionTokenizer, PolarActionTokenizerConfig
+from .polar_tokenizer import CompactPolarTokenMapper, PolarActionTokenizer, PolarActionTokenizerConfig
 from .pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR
+from .sample_polar_tokens import generate_tokens
+from .visualize import save_strokes_png
 from .train_action_tokens import average, update_sums
 
 
@@ -41,6 +43,7 @@ def save_checkpoint(
     output_dir: Path,
     model: TextConditionedPolarModel,
     tokenizer: PolarActionTokenizer,
+    compact_mapper: CompactPolarTokenMapper | None,
     args: argparse.Namespace,
     epoch: int,
 ) -> None:
@@ -51,6 +54,8 @@ def save_checkpoint(
             "context_proj": model.context_proj.state_dict(),
             "decoder_cfg": model.decoder.cfg.to_dict(),
             "polar_tokenizer_cfg": tokenizer.cfg.to_dict(),
+            "compact_vocab_size": None if compact_mapper is None else compact_mapper.action_vocab_size,
+            "compact_vocab_file": args.vocab_file,
             "max_text_len": model.max_text_len,
             "text_encoder_dir": str(args.text_encoder_dir),
             "epoch": epoch,
@@ -58,6 +63,31 @@ def save_checkpoint(
         output_dir / "checkpoint.pt",
     )
     (output_dir / "train_args.json").write_text(json.dumps(vars(args), indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def save_sample_preview(
+    model: TextConditionedPolarModel,
+    tokenizer: PolarActionTokenizer,
+    compact_mapper: CompactPolarTokenMapper | None,
+    prompt: str,
+    output_png: Path,
+    output_json: Path | None = None,
+    *,
+    max_steps: int,
+    device: torch.device,
+) -> None:
+    tokens = generate_tokens(model, tokenizer, compact_mapper, prompt, max_steps=max_steps, device=device)
+    raw_tokens = [compact_mapper.decode(token) for token in tokens] if compact_mapper is not None else tokens
+    strokes = tokenizer.decode_tokens(raw_tokens)
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    save_strokes_png(strokes, output_png, title=prompt)
+    if output_json is not None:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(
+            json.dumps({"prompt": prompt, "tokens": tokens, "strokes": strokes}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    print(f"saved sample preview {output_png}", flush=True)
 
 
 def append_jsonl(path: Path, record: dict) -> None:
@@ -121,6 +151,7 @@ def main() -> None:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--distances", type=str, default="0.1,0.2,0.3,0.4,0.5")
     parser.add_argument("--theta-bins", type=int, default=360)
+    parser.add_argument("--vocab-file", type=str, default=None)
     parser.add_argument("--max-text-len", type=int, default=64)
     parser.add_argument("--max-action-len", type=int, default=192)
     parser.add_argument("--d-model", type=int, default=384)
@@ -128,14 +159,29 @@ def main() -> None:
     parser.add_argument("--decoder-layers", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--log-every", type=int, default=20)
+    parser.add_argument("--plot-metrics", action="store_true")
+    parser.add_argument("--sample-prompts", type=str, default=None, help="Comma-separated prompts to visualize after each epoch.")
+    parser.add_argument("--sample-every", type=int, default=0, help="Save preview samples every N epochs. 0 disables.")
+    parser.add_argument("--sample-dir", type=str, default=None, help="Directory for epoch preview images.")
+    parser.add_argument("--sample-max-steps", type=int, default=192)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    distances = tuple(float(v.strip()) for v in args.distances.split(",") if v.strip())
-    tokenizer = PolarActionTokenizer(PolarActionTokenizerConfig(distance_buckets=distances, theta_bins=args.theta_bins))
-    dataset = PolarActionJsonlDataset(args.data, tokenizer=tokenizer, max_action_len=args.max_action_len, limit=args.limit)
+    compact_mapper = CompactPolarTokenMapper.from_vocab_file(args.vocab_file) if args.vocab_file else None
+    if args.vocab_file:
+        tokenizer = PolarActionTokenizer.from_vocab_file(args.vocab_file)
+    else:
+        distances = tuple(float(v.strip()) for v in args.distances.split(",") if v.strip())
+        tokenizer = PolarActionTokenizer(PolarActionTokenizerConfig(distance_buckets=distances, theta_bins=args.theta_bins))
+    dataset = PolarActionJsonlDataset(
+        args.data,
+        tokenizer=tokenizer,
+        compact_mapper=compact_mapper,
+        max_action_len=args.max_action_len,
+        limit=args.limit,
+    )
 
     val_size = max(1, int(len(dataset) * args.val_ratio))
     train_size = len(dataset) - val_size
@@ -144,8 +190,8 @@ def main() -> None:
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False)
 
     cfg = PolarDecoderConfig(
-        vocab_size=tokenizer.vocab_size,
-        pad_token_id=tokenizer.pad_id,
+        vocab_size=compact_mapper.vocab_size if compact_mapper is not None else tokenizer.vocab_size,
+        pad_token_id=compact_mapper.pad_id if compact_mapper is not None else tokenizer.pad_id,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_decoder_layers=args.decoder_layers,
@@ -160,10 +206,13 @@ def main() -> None:
     step_log_path = output_dir / "step_metrics.jsonl"
     epoch_log_path = output_dir / "epoch_metrics.jsonl"
     print(
-        f"device={device} train={train_size} val={val_size} vocab={tokenizer.vocab_size} "
+        f"device={device} train={train_size} val={val_size} vocab={cfg.vocab_size} "
         f"decoder_params={sum(p.numel() for p in model.decoder.parameters()):,}",
         flush=True,
     )
+
+    sample_prompts = [p.strip() for p in args.sample_prompts.split(",") if p.strip()] if args.sample_prompts else []
+    sample_dir = Path(args.sample_dir) if args.sample_dir else output_dir / "samples"
 
     best_val = float("inf")
     for epoch in range(1, args.epochs + 1):
@@ -187,7 +236,35 @@ def main() -> None:
         )
         if is_best:
             best_val = val_metrics["loss"]
-            save_checkpoint(output_dir, model, tokenizer, args, epoch)
+            save_checkpoint(output_dir, model, tokenizer, compact_mapper, args, epoch)
+
+        if sample_prompts and args.sample_every > 0 and epoch % args.sample_every == 0:
+            for idx, prompt in enumerate(sample_prompts, start=1):
+                png_path = sample_dir / f"epoch{epoch:03d}_{idx:02d}.png"
+                json_path = sample_dir / f"epoch{epoch:03d}_{idx:02d}.json"
+                save_sample_preview(
+                    model,
+                    tokenizer,
+                    compact_mapper,
+                    prompt,
+                    png_path,
+                    json_path,
+                    max_steps=args.sample_max_steps,
+                    device=device,
+                )
+
+    if args.plot_metrics:
+        from .plot_training_metrics import main as plot_main
+
+        plot_args = ["--run-dir", str(output_dir), "--output", str(output_dir / "metrics.png")]
+        import sys
+
+        old_argv = sys.argv
+        try:
+            sys.argv = ["plot_training_metrics.py", *plot_args]
+            plot_main()
+        finally:
+            sys.argv = old_argv
 
     print(f"saved best checkpoint to {output_dir / 'checkpoint.pt'}", flush=True)
 

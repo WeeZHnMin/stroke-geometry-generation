@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from .polar_model import PolarDecoderConfig, TextConditionedPolarModel
-from .polar_tokenizer import PolarActionTokenizer, PolarActionTokenizerConfig
+from .polar_tokenizer import CompactPolarTokenMapper, PolarActionTokenizer, PolarActionTokenizerConfig
 from .pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR
 from .visualize import save_strokes_png
 
@@ -13,7 +13,13 @@ from .visualize import save_strokes_png
 def load_model(checkpoint_path: str | Path, device: torch.device, text_encoder_dir: str | None = None):
     checkpoint_path = Path(checkpoint_path)
     state = torch.load(checkpoint_path, map_location=device)
-    tokenizer = PolarActionTokenizer(PolarActionTokenizerConfig(**state["polar_tokenizer_cfg"]))
+    compact_mapper = None
+    if state.get("compact_vocab_file"):
+        tokenizer = PolarActionTokenizer.from_vocab_file(state["compact_vocab_file"])
+    else:
+        tokenizer = PolarActionTokenizer(PolarActionTokenizerConfig(**state["polar_tokenizer_cfg"]))
+    if state.get("compact_vocab_file"):
+        compact_mapper = CompactPolarTokenMapper.from_vocab_file(state["compact_vocab_file"])
     action_cfg = state["decoder_cfg"]
     cfg = PolarDecoderConfig(
         vocab_size=action_cfg["action_vocab_size"],
@@ -31,13 +37,14 @@ def load_model(checkpoint_path: str | Path, device: torch.device, text_encoder_d
     model.context_proj.load_state_dict(state["context_proj"])
     model.to(device)
     model.eval()
-    return model, tokenizer
+    return model, tokenizer, compact_mapper
 
 
 @torch.no_grad()
 def generate_tokens(
     model: TextConditionedPolarModel,
     tokenizer: PolarActionTokenizer,
+    compact_mapper: CompactPolarTokenMapper | None,
     prompt: str,
     max_steps: int = 192,
     device: torch.device | str = "cpu",
@@ -45,7 +52,8 @@ def generate_tokens(
     text = model.encode_text([prompt])
     text = {key: value.to(device) for key, value in text.items()}
     cache = None
-    input_id = torch.tensor([tokenizer.start_id], dtype=torch.long, device=device)
+    start_id = compact_mapper.start_id if compact_mapper is not None else tokenizer.start_id
+    input_id = torch.tensor([start_id], dtype=torch.long, device=device)
     tokens: list[int] = []
     for pos in range(max_steps):
         out, cache = model.decode_step(
@@ -56,11 +64,15 @@ def generate_tokens(
             cache=cache,
         )
         logits = out["logits"][0, 0]
-        logits[tokenizer.action_vocab_size :] = torch.finfo(logits.dtype).min
+        if compact_mapper is not None:
+            logits[compact_mapper.action_vocab_size :] = torch.finfo(logits.dtype).min
+        else:
+            logits[tokenizer.action_vocab_size :] = torch.finfo(logits.dtype).min
         token_id = int(logits.argmax(dim=-1).item())
         tokens.append(token_id)
         input_id = torch.tensor([token_id], dtype=torch.long, device=device)
-        stroke = tokenizer.token_to_stroke(token_id)
+        raw_token_id = compact_mapper.decode(token_id) if compact_mapper is not None else token_id
+        stroke = tokenizer.token_to_stroke(raw_token_id)
         if stroke["pen_state"] == "end_all":
             break
     return tokens
@@ -77,9 +89,10 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer = load_model(args.checkpoint, device, text_encoder_dir=args.text_encoder_dir)
-    tokens = generate_tokens(model, tokenizer, args.prompt, max_steps=args.max_steps, device=device)
-    strokes = tokenizer.decode_tokens(tokens)
+    model, tokenizer, compact_mapper = load_model(args.checkpoint, device, text_encoder_dir=args.text_encoder_dir)
+    tokens = generate_tokens(model, tokenizer, compact_mapper, args.prompt, max_steps=args.max_steps, device=device)
+    raw_tokens = [compact_mapper.decode(token) for token in tokens] if compact_mapper is not None else tokens
+    strokes = tokenizer.decode_tokens(raw_tokens)
     payload = {"prompt": args.prompt, "tokens": tokens, "strokes": strokes}
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     if args.json:
