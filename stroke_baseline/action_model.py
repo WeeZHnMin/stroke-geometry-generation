@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .action_tokenizer import ActionTokenizerConfig, StrokeActionTokenizer
 from .pretrained_encoder_decoder import (
@@ -23,6 +24,8 @@ class ActionDecoderConfig:
     ff_mult: int = 4
     dropout: float = 0.1
     max_action_len: int = 384
+    attention_variant: str = "legacy"
+    trend_kernel_size: int = 5
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -38,6 +41,41 @@ class ActionDecoderConfig:
         )
 
 
+class CausalConv1d(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int):
+        super().__init__()
+        if kernel_size <= 0:
+            raise ValueError("kernel_size must be positive")
+        self.kernel_size = int(kernel_size)
+        self.left_padding = self.kernel_size - 1
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=self.kernel_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.transpose(1, 2)
+        x = F.pad(x, (self.left_padding, 0))
+        x = self.conv(x)
+        return x.transpose(1, 2)
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        buffer: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if x.size(1) != 1:
+            raise ValueError("forward_step expects one token: [B, 1, C].")
+        if self.left_padding == 0:
+            out = self.conv(x.transpose(1, 2)).transpose(1, 2)
+            return out, None
+
+        if buffer is None:
+            buffer = torch.zeros(x.size(0), self.left_padding, x.size(2), dtype=x.dtype, device=x.device)
+        else:
+            buffer = buffer[:, -self.left_padding :, :]
+        window = torch.cat([buffer, x], dim=1)
+        out = self.conv(window.transpose(1, 2)).transpose(1, 2)
+        return out, window[:, -self.left_padding :, :]
+
+
 class CachedTokenSelfAttention(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
@@ -48,6 +86,9 @@ class CachedTokenSelfAttention(nn.Module):
         self.qkv = nn.Linear(cfg.d_model, cfg.d_model * 3)
         self.out = nn.Linear(cfg.d_model, cfg.d_model)
         self.dropout = nn.Dropout(cfg.dropout)
+
+    def init_state(self) -> dict[str, torch.Tensor | None]:
+        return {"self_k": None, "self_v": None}
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         bsz, seq_len, _ = x.shape
@@ -78,24 +119,127 @@ class CachedTokenSelfAttention(nn.Module):
     def forward_step(
         self,
         x: torch.Tensor,
-        past_k: torch.Tensor | None = None,
-        past_v: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cache: dict[str, torch.Tensor | None],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q = self._split_heads(q)
         k = self._split_heads(k)
         v = self._split_heads(v)
+        past_k = cache.get("self_k")
+        past_v = cache.get("self_v")
         k_all = k if past_k is None else torch.cat([past_k, k], dim=2)
         v_all = v if past_v is None else torch.cat([past_v, v], dim=2)
         scores = (q @ k_all.transpose(-2, -1)) / (self.head_dim**0.5)
         attn = self.dropout(torch.softmax(scores, dim=-1))
-        return self.out(self._merge_heads(attn @ v_all)), k_all, v_all
+        cache["self_k"] = k_all
+        cache["self_v"] = v_all
+        return self.out(self._merge_heads(attn @ v_all)), cache
+
+
+class HeterogeneousCachedTokenSelfAttention(nn.Module):
+    def __init__(self, cfg: ActionDecoderConfig):
+        super().__init__()
+        assert cfg.d_model % cfg.n_heads == 0
+        if cfg.n_heads % 2 != 0:
+            raise ValueError("hetero attention requires an even number of heads")
+        self.d_model = cfg.d_model
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.d_model // cfg.n_heads
+        self.n_static_heads = cfg.n_heads // 2
+        self.n_trend_heads = cfg.n_heads - self.n_static_heads
+        self.q_proj = nn.Linear(cfg.d_model, cfg.d_model)
+        self.k_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
+        self.v_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
+        self.causal_conv = CausalConv1d(cfg.d_model, cfg.d_model, kernel_size=cfg.trend_kernel_size)
+        self.trend_act = nn.SiLU()
+        self.k_proj_trend = nn.Linear(cfg.d_model, self.n_trend_heads * self.head_dim)
+        self.v_proj_trend = nn.Linear(cfg.d_model, self.n_trend_heads * self.head_dim)
+        self.out = nn.Linear(cfg.d_model, cfg.d_model)
+        self.dropout = nn.Dropout(cfg.dropout)
+        nn.init.zeros_(self.k_proj_trend.weight)
+        nn.init.zeros_(self.v_proj_trend.weight)
+        if self.k_proj_trend.bias is not None:
+            nn.init.zeros_(self.k_proj_trend.bias)
+        if self.v_proj_trend.bias is not None:
+            nn.init.zeros_(self.v_proj_trend.bias)
+
+    def init_state(self) -> dict[str, torch.Tensor | None]:
+        return {"self_k": None, "self_v": None, "conv_buffer": None}
+
+    def _split_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
+        bsz, seq_len, _ = x.shape
+        return x.view(bsz, seq_len, num_heads, self.head_dim).transpose(1, 2)
+
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        bsz, _, seq_len, _ = x.shape
+        return x.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
+
+    def _project_kv(self, x: torch.Tensor, x_conv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        k_static = self._split_heads(self.k_proj_static(x), self.n_static_heads)
+        v_static = self._split_heads(self.v_proj_static(x), self.n_static_heads)
+        k_trend = self._split_heads(self.k_proj_trend(x_conv), self.n_trend_heads)
+        v_trend = self._split_heads(self.v_proj_trend(x_conv), self.n_trend_heads)
+        return torch.cat([k_static, k_trend], dim=1), torch.cat([v_static, v_trend], dim=1)
+
+    def _attend(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        causal_mask: torch.Tensor | None = None,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        scores = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
+        if causal_mask is not None:
+            scores = scores.masked_fill(causal_mask[None, None, :, :], torch.finfo(scores.dtype).min)
+        if key_padding_mask is not None:
+            scores = scores.masked_fill(key_padding_mask[:, None, None, :], torch.finfo(scores.dtype).min)
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+        return self.out(self._merge_heads(attn @ v))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        causal_mask: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        q = self._split_heads(self.q_proj(x), self.n_heads)
+        x_conv = self.trend_act(self.causal_conv(x))
+        k, v = self._project_kv(x, x_conv)
+        return self._attend(q, k, v, causal_mask=causal_mask, key_padding_mask=key_padding_mask)
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        cache: dict[str, torch.Tensor | None],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
+        q = self._split_heads(self.q_proj(x), self.n_heads)
+        x_conv, conv_buffer = self.causal_conv.forward_step(x, cache.get("conv_buffer"))
+        x_conv = self.trend_act(x_conv)
+        k, v = self._project_kv(x, x_conv)
+        past_k = cache.get("self_k")
+        past_v = cache.get("self_v")
+        k_all = k if past_k is None else torch.cat([past_k, k], dim=2)
+        v_all = v if past_v is None else torch.cat([past_v, v], dim=2)
+        out = self._attend(q, k_all, v_all)
+        cache["self_k"] = k_all
+        cache["self_v"] = v_all
+        cache["conv_buffer"] = conv_buffer
+        return out, cache
+
+
+def build_self_attention(cfg: ActionDecoderConfig) -> nn.Module:
+    if cfg.attention_variant == "legacy":
+        return CachedTokenSelfAttention(cfg)
+    if cfg.attention_variant == "hetero":
+        return HeterogeneousCachedTokenSelfAttention(cfg)
+    raise ValueError(f"Unsupported attention_variant: {cfg.attention_variant}")
 
 
 class ActionDecoderBlock(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
-        self.self_attn = CachedTokenSelfAttention(cfg)
+        self.self_attn = build_self_attention(cfg)
         self.cross_attn = CrossAttention(cfg.as_stroke_cfg())
         self.ffn = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model * cfg.ff_mult),
@@ -123,7 +267,7 @@ class ActionDecoderBlock(nn.Module):
 
     def init_cross_cache(self, context: torch.Tensor) -> dict[str, torch.Tensor | None]:
         cross_k, cross_v = self.cross_attn.project_kv(context)
-        return {"self_k": None, "self_v": None, "cross_k": cross_k, "cross_v": cross_v}
+        return {**self.self_attn.init_state(), "cross_k": cross_k, "cross_v": cross_v}
 
     def forward_step(
         self,
@@ -131,13 +275,7 @@ class ActionDecoderBlock(nn.Module):
         cache: dict[str, torch.Tensor | None],
         context_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
-        self_out, self_k, self_v = self.self_attn.forward_step(
-            self.norm1(x),
-            past_k=cache.get("self_k"),
-            past_v=cache.get("self_v"),
-        )
-        cache["self_k"] = self_k
-        cache["self_v"] = self_v
+        self_out, cache = self.self_attn.forward_step(self.norm1(x), cache)
         x = x + self.dropout(self_out)
         cross_k = cache.get("cross_k")
         cross_v = cache.get("cross_v")

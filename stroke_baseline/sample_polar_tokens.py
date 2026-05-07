@@ -30,6 +30,8 @@ def load_model(checkpoint_path: str | Path, device: torch.device, text_encoder_d
         ff_mult=action_cfg["ff_mult"],
         dropout=action_cfg["dropout"],
         max_action_len=action_cfg["max_action_len"],
+        attention_variant=action_cfg.get("attention_variant", "legacy"),
+        trend_kernel_size=action_cfg.get("trend_kernel_size", 5),
     )
     enc_dir = text_encoder_dir or state.get("text_encoder_dir", str(DEFAULT_TEXT_ENCODER_DIR))
     model = TextConditionedPolarModel(cfg, text_encoder_dir=enc_dir, max_text_len=state["max_text_len"])

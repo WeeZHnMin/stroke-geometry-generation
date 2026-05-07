@@ -158,6 +158,8 @@ def main() -> None:
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--decoder-layers", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--attention-variant", type=str, default="legacy", choices=["legacy", "hetero"])
+    parser.add_argument("--trend-kernel-size", type=int, default=5)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--plot-metrics", action="store_true")
     parser.add_argument("--sample-prompts", type=str, default=None, help="Comma-separated prompts to visualize after each epoch.")
@@ -197,6 +199,8 @@ def main() -> None:
         num_decoder_layers=args.decoder_layers,
         dropout=args.dropout,
         max_action_len=args.max_action_len,
+        attention_variant=args.attention_variant,
+        trend_kernel_size=args.trend_kernel_size,
     )
     model = TextConditionedPolarModel(cfg, text_encoder_dir=args.text_encoder_dir, max_text_len=args.max_text_len).to(device)
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=args.weight_decay)

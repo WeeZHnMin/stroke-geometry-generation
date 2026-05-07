@@ -18,6 +18,8 @@ class PolarDecoderConfig:
     ff_mult: int = 4
     dropout: float = 0.1
     max_action_len: int = 192
+    attention_variant: str = "legacy"
+    trend_kernel_size: int = 5
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -32,6 +34,8 @@ class PolarDecoderConfig:
             ff_mult=self.ff_mult,
             dropout=self.dropout,
             max_action_len=self.max_action_len,
+            attention_variant=self.attention_variant,
+            trend_kernel_size=self.trend_kernel_size,
         )
 
 
