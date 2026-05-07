@@ -58,13 +58,13 @@ SHAPE_ZH = {
 }
 
 
-def pen_state_to_onehot(pen_state: str) -> tuple[int, int, int]:
+def pen_state_to_label(pen_state: str) -> int:
     if pen_state == "move":
-        return (1, 0, 0)
+        return 0
     if pen_state == "draw":
-        return (0, 1, 0)
+        return 1
     if pen_state == "end_all":
-        return (0, 0, 1)
+        return 2
     raise ValueError(f"unsupported pen_state: {pen_state}")
 
 
@@ -223,15 +223,17 @@ def verify_strokes(strokes: list[StrokeStep]) -> None:
 
 def build_continuous_sequence(strokes: list[StrokeStep]) -> list[dict[str, float | int]]:
     sequence: list[dict[str, float | int]] = []
+    x = 0.0
+    y = 0.0
     for step in strokes:
-        pen_move, pen_draw, pen_end_all = pen_state_to_onehot(step.pen_state)
+        x += step.dx
+        y += step.dy
         sequence.append(
             {
-                "dx": step.dx,
-                "dy": step.dy,
-                "pen_move": pen_move,
-                "pen_draw": pen_draw,
-                "pen_end_all": pen_end_all,
+                "x": x,
+                "y": y,
+                "pen_id": pen_state_to_label(step.pen_state),
+                "pen_state": step.pen_state,
             }
         )
     return sequence
@@ -264,7 +266,7 @@ def sample_scene(
         "grid_size": GRID_SIZE,
         "max_delta": MAX_DELTA,
         "pen_states": ["move", "draw", "end_all"],
-        "step_format": ["dx", "dy", "pen_move", "pen_draw", "pen_end_all"],
+        "step_format": ["x", "y", "pen_id"],
     }
     prompt = make_prompt(shape.shape_type, shape.bbox, rng, canvas_size)
     metadata = annotate_metadata({**scene_spec, "scene_type": "single_basic"}, [shape], strokes)
@@ -278,7 +280,7 @@ def sample_scene(
             "num_move_actions": sum(1 for step in strokes if step.pen_state == "move"),
             "num_draw_actions": sum(1 for step in strokes if step.pen_state == "draw"),
             "num_end_all_actions": sum(1 for step in strokes if step.pen_state == "end_all"),
-            "continuous_step_dim": 5,
+            "continuous_step_dim": 3,
         }
     )
     return {

@@ -76,10 +76,8 @@ def train_one_epoch(model, scheduler, loader, optimizer, device, args, epoch, st
         loss, metrics = compute_diffusion_reconstruction_loss(
             pred_steps=out["pred_steps"],
             target_steps=target_steps,
-            target_abs=batch["target_abs"],
-            start_pos=batch["start_pos"],
+            pen_targets=batch["pen_ids"],
             seq_mask=batch["seq_mask"],
-            lambda_abs=args.lambda_abs,
             lambda_pen=args.lambda_pen,
         )
         loss.backward()
@@ -90,10 +88,10 @@ def train_one_epoch(model, scheduler, loader, optimizer, device, args, epoch, st
         if step % args.log_every == 0:
             print(
                 f"epoch={epoch} step={step}/{len(loader)} loss={metrics['loss']:.5f} "
-                f"rel={metrics['loss_rel']:.5f} abs={metrics['loss_abs']:.5f} "
-                f"pen={metrics['loss_pen']:.5f} d_mae={metrics['delta_mae']:.4f} "
-                f"abs_mae={metrics['abs_mae']:.4f} pen_acc={metrics['pen_acc']:.3f} "
-                f"end_err={metrics['end_pos_error']:.3f} len_err={metrics['length_error']:.3f}",
+                f"xy={metrics['loss_xy']:.5f} pen={metrics['loss_pen']:.5f} "
+                f"x_mae={metrics['x_mae']:.4f} y_mae={metrics['y_mae']:.4f} "
+                f"xy_mae={metrics['xy_mae']:.4f} pen_acc={metrics['pen_acc']:.3f} "
+                f"pen_mae={metrics['pen_mae']:.3f}",
                 flush=True,
             )
             append_jsonl(step_log_path, {"epoch": epoch, "step": step, "split": "train", **metrics})
@@ -119,10 +117,8 @@ def evaluate(model, scheduler, loader, device, args):
         _, metrics = compute_diffusion_reconstruction_loss(
             pred_steps=out["pred_steps"],
             target_steps=target_steps,
-            target_abs=batch["target_abs"],
-            start_pos=batch["start_pos"],
+            pen_targets=batch["pen_ids"],
             seq_mask=batch["seq_mask"],
-            lambda_abs=args.lambda_abs,
             lambda_pen=args.lambda_pen,
         )
         update_sums(totals, counts, metrics)
@@ -150,7 +146,6 @@ def main() -> None:
     parser.add_argument("--num-train-timesteps", type=int, default=1000)
     parser.add_argument("--beta-start", type=float, default=1e-4)
     parser.add_argument("--beta-end", type=float, default=0.02)
-    parser.add_argument("--lambda-abs", type=float, default=1.0)
     parser.add_argument("--lambda-pen", type=float, default=0.2)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
@@ -209,9 +204,9 @@ def main() -> None:
         is_best = val_metrics["loss"] < best_val
         print(
             f"epoch={epoch} train_loss={train_metrics['loss']:.5f} val_loss={val_metrics['loss']:.5f} "
-            f"val_d_mae={val_metrics['delta_mae']:.4f} val_abs_mae={val_metrics['abs_mae']:.4f} "
-            f"val_pen_acc={val_metrics['pen_acc']:.3f} val_end_err={val_metrics['end_pos_error']:.3f} "
-            f"val_len_err={val_metrics['length_error']:.3f}",
+            f"val_x_mae={val_metrics['x_mae']:.4f} val_y_mae={val_metrics['y_mae']:.4f} "
+            f"val_xy_mae={val_metrics['xy_mae']:.4f} val_pen_acc={val_metrics['pen_acc']:.3f} "
+            f"val_pen_mae={val_metrics['pen_mae']:.3f}",
             flush=True,
         )
         append_jsonl(

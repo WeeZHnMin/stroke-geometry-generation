@@ -10,11 +10,12 @@ from stroke_baseline.dataset import read_jsonl
 from stroke_baseline.pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR
 from stroke_baseline.visualize import save_strokes_png
 
+from .dataset import PEN_STATE_TO_ID
 from .model import STEP_DIM, StrokeDiffusionConfig, TextConditionedStrokeDiffusionModel
 from .scheduler import DiffusionScheduler
 
 
-PEN_STATES = ["move", "draw", "end_all"]
+PEN_ID_TO_STATE = {pen_id: pen_state for pen_state, pen_id in PEN_STATE_TO_ID.items()}
 
 
 def load_model(checkpoint: str | Path, device: torch.device) -> tuple[TextConditionedStrokeDiffusionModel, dict]:
@@ -76,7 +77,8 @@ def sample_sequence(
     for timestep in reversed(range(num_train_timesteps)):
         pred_x0 = predict_x0(model, xt, timestep, prompt, seq_mask)
         pred_x0 = pred_x0.clone()
-        pred_x0[..., :2] = pred_x0[..., :2].clamp(-0.5, 0.5)
+        pred_x0[..., :2] = pred_x0[..., :2].clamp(0.0, 1.0)
+        pred_x0[..., 2] = pred_x0[..., 2].clamp(0.0, 2.0)
 
         alpha_t = scheduler.alphas[timestep]
         alpha_bar_t = scheduler.alpha_bars[timestep]
@@ -95,10 +97,9 @@ def sample_sequence(
     return xt[0].detach().cpu()
 
 
-def steps_tensor_to_strokes(steps: torch.Tensor) -> list[dict]:
-    pen_logits = steps[:, 2:]
-    pen_ids = pen_logits.argmax(dim=-1).tolist()
-    deltas = steps[:, :2].tolist()
+def absolute_steps_to_sequences(steps: torch.Tensor) -> tuple[list[dict], list[dict]]:
+    pen_ids = steps[:, 2].round().clamp(min=0, max=2).long().tolist()
+    points = steps[:, :2].tolist()
 
     end_idx = None
     for idx, pen_id in enumerate(pen_ids):
@@ -108,20 +109,32 @@ def steps_tensor_to_strokes(steps: torch.Tensor) -> list[dict]:
     if end_idx is None:
         end_idx = len(pen_ids) - 1
 
+    absolute_steps: list[dict] = []
     strokes: list[dict] = []
+    prev_x = 0.0
+    prev_y = 0.0
     for idx in range(end_idx + 1):
-        dx, dy = deltas[idx]
-        pen_state = PEN_STATES[pen_ids[idx]]
-        if idx == end_idx:
-            pen_state = "end_all"
-        strokes.append(
+        x, y = points[idx]
+        pen_id = 2 if idx == end_idx else pen_ids[idx]
+        pen_state = PEN_ID_TO_STATE[pen_id]
+        absolute_steps.append(
             {
-                "dx": round(float(dx), 4),
-                "dy": round(float(dy), 4),
+                "x": round(float(x), 4),
+                "y": round(float(y), 4),
+                "pen_id": int(pen_id),
                 "pen_state": pen_state,
             }
         )
-    return strokes
+        strokes.append(
+            {
+                "dx": round(float(x - prev_x), 4),
+                "dy": round(float(y - prev_y), 4),
+                "pen_state": pen_state,
+            }
+        )
+        prev_x = float(x)
+        prev_y = float(y)
+    return absolute_steps, strokes
 
 
 def save_json(payload: dict, path: str | Path) -> None:
@@ -170,11 +183,12 @@ def main() -> None:
         device=device,
         seed=args.seed,
     )
-    strokes = steps_tensor_to_strokes(steps)
+    absolute_steps, strokes = absolute_steps_to_sequences(steps)
 
     payload = {
         "prompt": prompt,
-        "num_steps": len(strokes),
+        "num_steps": len(absolute_steps),
+        "absolute_sequence": absolute_steps,
         "strokes": strokes,
     }
     save_json(payload, args.json)
@@ -182,7 +196,7 @@ def main() -> None:
 
     print(f"device={device}")
     print(f"prompt={prompt}")
-    print(f"num_steps={len(strokes)}")
+    print(f"num_steps={len(absolute_steps)}")
     print(f"saved_json={args.json}")
     print(f"saved_png={args.png}")
 

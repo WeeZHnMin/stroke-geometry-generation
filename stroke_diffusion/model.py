@@ -9,8 +9,7 @@ import torch.nn as nn
 
 from stroke_baseline.pretrained_encoder_decoder import CrossAttention, DEFAULT_TEXT_ENCODER_DIR, FrozenChineseTextEncoder
 
-
-STEP_DIM = 5
+from .dataset import STEP_DIM
 
 
 @dataclass
@@ -55,7 +54,7 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class StepEmbedding(nn.Module):
-    """Embed one continuous stroke step [dx, dy, pen_move, pen_draw, pen_end_all]."""
+    """Embed one stroke step [x, y, pen_id]."""
 
     def __init__(self, d_model: int):
         super().__init__()
