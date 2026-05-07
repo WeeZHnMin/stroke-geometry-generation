@@ -79,41 +79,53 @@ class CachedTokenSelfAttention(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
         assert cfg.d_model % cfg.n_heads == 0
+
         self.d_model = cfg.d_model
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.d_model // cfg.n_heads
-        
-        # 约定：将所有的头对半劈开 (例如 8个头 -> 4个静态头, 4个趋势头)
+
         self.n_static_heads = cfg.n_heads // 2
         self.n_trend_heads = cfg.n_heads - self.n_static_heads
-        
-        # 1. Query 是全局提问者，统一生成
+
         self.q_proj = nn.Linear(cfg.d_model, cfg.d_model)
-        
-        # 2. 分支 A: 静态记忆分支 (负责记住具体的 Token 绝对信息)
-        self.k_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
-        self.v_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
-        
-        # 3. 分支 B: 动态趋势分支 (包含 1D 因果卷积)
-        self.kernel_size = 5
-        # 使用 groups=d_model 做深度可分离卷积，参数更少且不易崩溃
-        self.causal_conv = nn.Conv1d(
-            in_channels=cfg.d_model, 
-            out_channels=cfg.d_model, 
-            kernel_size=self.kernel_size, 
-            groups=cfg.d_model
+
+        self.k_proj_static = nn.Linear(
+            cfg.d_model,
+            self.n_static_heads * self.head_dim,
         )
-        self.k_proj_trend = nn.Linear(cfg.d_model, self.n_trend_heads * self.head_dim)
-        self.v_proj_trend = nn.Linear(cfg.d_model, self.n_trend_heads * self.head_dim)
-        
-        # 零初始化趋势投影层，作为安全气囊！(让初期训练绝对稳定)
+        self.v_proj_static = nn.Linear(
+            cfg.d_model,
+            self.n_static_heads * self.head_dim,
+        )
+
+        self.kernel_size = 5
+        self.causal_conv = nn.Conv1d(
+            in_channels=cfg.d_model,
+            out_channels=cfg.d_model,
+            kernel_size=self.kernel_size,
+            groups=cfg.d_model,
+        )
+        self.k_proj_trend = nn.Linear(
+            cfg.d_model,
+            self.n_trend_heads * self.head_dim,
+        )
+        self.v_proj_trend = nn.Linear(
+            cfg.d_model,
+            self.n_trend_heads * self.head_dim,
+        )
+
         nn.init.zeros_(self.k_proj_trend.weight)
-        nn.init.zeros_(self.k_proj_trend.bias)
         nn.init.zeros_(self.v_proj_trend.weight)
-        nn.init.zeros_(self.v_proj_trend.bias)
+        if self.k_proj_trend.bias is not None:
+            nn.init.zeros_(self.k_proj_trend.bias)
+        if self.v_proj_trend.bias is not None:
+            nn.init.zeros_(self.v_proj_trend.bias)
 
         self.out = nn.Linear(cfg.d_model, cfg.d_model)
         self.dropout = nn.Dropout(cfg.dropout)
+
+    def init_state(self) -> dict[str, torch.Tensor | None]:
+        return {"self_k": None, "self_v": None}
 
     def _split_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
         bsz, seq_len, _ = x.shape
@@ -129,36 +141,43 @@ class CachedTokenSelfAttention(nn.Module):
         causal_mask: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        bsz, seq_len, _ = x.shape
-        
-        # 1. 计算 Query
-        q = self._split_heads(self.q_proj(x), self.n_heads) # [B, 8, L, D]
-        
-        # 2. 计算 静态 K, V
-        k_static = self._split_heads(self.k_proj_static(x), self.n_static_heads) # [B, 4, L, D]
-        v_static = self._split_heads(self.v_proj_static(x), self.n_static_heads) # [B, 4, L, D]
-        
-        # 3. 计算 趋势 K, V (因果卷积处理)
-        # 必须在序列左侧(过去) Padding 确保因果性
-        x_pad = F.pad(x.transpose(1, 2), (self.kernel_size - 1, 0)) # [B, C, L + K - 1]
-        x_conv = self.causal_conv(x_pad).transpose(1, 2) # 恢复为 [B, L, C]
-        x_conv = F.silu(x_conv) # 加上非线性激活
-        
-        k_trend = self._split_heads(self.k_proj_trend(x_conv), self.n_trend_heads) # [B, 4, L, D]
-        v_trend = self._split_heads(self.v_proj_trend(x_conv), self.n_trend_heads) # [B, 4, L, D]
-        
-        # 4. 异构特征合体 (在 head 维度拼接: 4 + 4 = 8)
-        k = torch.cat([k_static, k_trend], dim=1) # [B, 8, L, D]
-        v = torch.cat([v_static, v_trend], dim=1) # [B, 8, L, D]
+        q = self.q_proj(x)
+        q = self._split_heads(q, self.n_heads)
 
-        # 5. 标准 Attention 计算 (后续和原来一样)
+        k_static = self.k_proj_static(x)
+        v_static = self.v_proj_static(x)
+        k_static = self._split_heads(k_static, self.n_static_heads)
+        v_static = self._split_heads(v_static, self.n_static_heads)
+
+        x_conv = F.pad(x.transpose(1, 2), (self.kernel_size - 1, 0))
+        x_conv = self.causal_conv(x_conv)
+        x_conv = x_conv.transpose(1, 2)
+        x_conv = F.silu(x_conv)
+
+        k_trend = self.k_proj_trend(x_conv)
+        v_trend = self.v_proj_trend(x_conv)
+        k_trend = self._split_heads(k_trend, self.n_trend_heads)
+        v_trend = self._split_heads(v_trend, self.n_trend_heads)
+
+        k = torch.cat([k_static, k_trend], dim=1)
+        v = torch.cat([v_static, v_trend], dim=1)
+
         scores = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
         scores = scores.masked_fill(causal_mask[None, None, :, :], torch.finfo(scores.dtype).min)
         if key_padding_mask is not None:
             scores = scores.masked_fill(key_padding_mask[:, None, None, :], torch.finfo(scores.dtype).min)
         attn = self.dropout(torch.softmax(scores, dim=-1))
-        
-        return self.out(self._merge_heads(attn @ v))
+
+        out = attn @ v
+        out = self._merge_heads(out)
+        return self.out(out)
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        cache: dict[str, torch.Tensor | None],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
+        raise NotImplementedError("Streaming Conv1D cache for inference is pending")
 
 
 class HeterogeneousCachedTokenSelfAttention(nn.Module):
