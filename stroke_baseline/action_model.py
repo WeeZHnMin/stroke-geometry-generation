@@ -75,6 +75,66 @@ class CausalConv1d(nn.Module):
         out = self.conv(window.transpose(1, 2)).transpose(1, 2)
         return out, window[:, -self.left_padding :, :]
 
+class LegacyCachedTokenSelfAttention(nn.Module):
+    def __init__(self, cfg: ActionDecoderConfig):
+        super().__init__()
+        assert cfg.d_model % cfg.n_heads == 0
+        self.d_model = cfg.d_model
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.d_model // cfg.n_heads
+        self.qkv = nn.Linear(cfg.d_model, cfg.d_model * 3)
+        self.out = nn.Linear(cfg.d_model, cfg.d_model)
+        self.dropout = nn.Dropout(cfg.dropout)
+
+    def init_state(self) -> dict[str, torch.Tensor | None]:
+        return {"self_k": None, "self_v": None}
+
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        bsz, seq_len, _ = x.shape
+        return x.view(bsz, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        bsz, _, seq_len, _ = x.shape
+        return x.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        causal_mask: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = self._split_heads(q)
+        k = self._split_heads(k)
+        v = self._split_heads(v)
+
+        scores = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
+        scores = scores.masked_fill(causal_mask[None, None, :, :], torch.finfo(scores.dtype).min)
+        if key_padding_mask is not None:
+            scores = scores.masked_fill(key_padding_mask[:, None, None, :], torch.finfo(scores.dtype).min)
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+        return self.out(self._merge_heads(attn @ v))
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        cache: dict[str, torch.Tensor | None],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = self._split_heads(q)
+        k = self._split_heads(k)
+        v = self._split_heads(v)
+        past_k = cache.get("self_k")
+        past_v = cache.get("self_v")
+        k_all = k if past_k is None else torch.cat([past_k, k], dim=2)
+        v_all = v if past_v is None else torch.cat([past_v, v], dim=2)
+        scores = (q @ k_all.transpose(-2, -1)) / (self.head_dim**0.5)
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+        cache["self_k"] = k_all
+        cache["self_v"] = v_all
+        return self.out(self._merge_heads(attn @ v_all)), cache
+
+
 class CachedTokenSelfAttention(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
@@ -273,6 +333,8 @@ class HeterogeneousCachedTokenSelfAttention(nn.Module):
 
 
 def build_self_attention(cfg: ActionDecoderConfig) -> nn.Module:
+    if cfg.attention_variant == "legacy_qkv":
+        return LegacyCachedTokenSelfAttention(cfg)
     if cfg.attention_variant == "legacy":
         return CachedTokenSelfAttention(cfg)
     if cfg.attention_variant == "hetero":

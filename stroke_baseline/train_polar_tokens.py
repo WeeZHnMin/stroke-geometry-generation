@@ -158,7 +158,7 @@ def main() -> None:
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--decoder-layers", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--attention-variant", type=str, default="legacy", choices=["legacy", "hetero"])
+    parser.add_argument("--attention-variant", type=str, default="legacy", choices=["legacy_qkv", "legacy", "hetero"])
     parser.add_argument("--trend-kernel-size", type=int, default=5)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--plot-metrics", action="store_true")

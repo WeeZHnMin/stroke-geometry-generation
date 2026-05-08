@@ -18,7 +18,7 @@ class PolarDecoderConfig:
     ff_mult: int = 4
     dropout: float = 0.1
     max_action_len: int = 192
-    attention_variant: str = "legacy"
+    attention_variant: str = "legacy_qkv"
     trend_kernel_size: int = 5
 
     def to_dict(self) -> dict:
