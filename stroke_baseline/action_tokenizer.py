@@ -1,164 +1,216 @@
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Iterable
 
 import torch
 
-from .dataset import ID_TO_PEN, PEN_TO_ID
+
+GRID_SIZE = 101
+GRID_CELLS = GRID_SIZE * GRID_SIZE
+NUM_PEN_STATES = 3
+PAD_TOKEN_ID = GRID_CELLS * NUM_PEN_STATES
+VOCAB_SIZE = PAD_TOKEN_ID + 1
+
+MOVE_PEN_ID = 0
+DRAW_PEN_ID = 1
+END_PEN_ID = 2
+
+START_INPUT_PEN_ID = 3
+PAD_INPUT_PEN_ID = 4
+NUM_INPUT_PEN_STATES = 5
+
+RAW_PEN_TO_ID = {
+    "move": MOVE_PEN_ID,
+    "draw": DRAW_PEN_ID,
+    "end": END_PEN_ID,
+    "close": END_PEN_ID,
+    "end_shape": END_PEN_ID,
+    "end_all": END_PEN_ID,
+}
+ID_TO_RAW_PEN = {
+    MOVE_PEN_ID: "move",
+    DRAW_PEN_ID: "draw",
+    END_PEN_ID: "end_all",
+}
 
 
 @dataclass
-class ActionTokenizerConfig:
-    bins: int = 500
-    min_value: float = -0.5
-    max_value: float = 0.5
-    draw_min_value: float = -0.5
-    draw_max_value: float = 0.5
-    """Quantize dx/dy into 500 bins over [-0.5, 0.5] by default."""
+class CartesianTokenizerConfig:
+    vocab_size: int = VOCAB_SIZE
+    pad_id: int = PAD_TOKEN_ID
+    min_coord: float = -0.5
+    max_coord: float = 0.5
+    coord_step: float = 0.01
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-class StrokeActionTokenizer:
-    """OpenVLA-style per-dimension stroke action tokenizer.
+class CartesianActionTokenizer:
+    def __init__(self, cfg: CartesianTokenizerConfig | None = None):
+        self.cfg = cfg or CartesianTokenizerConfig()
+        self.vocab_size = self.cfg.vocab_size
+        self.pad_id = self.cfg.pad_id
+        self.start_input_pen_id = START_INPUT_PEN_ID
+        self.pad_input_pen_id = PAD_INPUT_PEN_ID
+        self.num_input_pen_states = NUM_INPUT_PEN_STATES
+        self.num_pen_states = NUM_PEN_STATES
+        self.grid_size = GRID_SIZE
+        self.grid_cells = GRID_CELLS
 
-    支持双阶段模式：
-      - encode_strokes / decode_tokens: 原始模式（整条 stroke 用 min/max_value）
-      - encode_draw_strokes / decode_draw_tokens: draw 专用模式（用 draw_min/draw_max_value）
-      双阶段模式下，第一步 move 由回归头预测绝对坐标，后续 draw 步用 tight range。
+    def _clamp_coord(self, value: float) -> float:
+        return max(self.cfg.min_coord, min(self.cfg.max_coord, float(value)))
 
-    Token ranges:
-    - dx: 0 .. bins - 1
-    - dy: bins .. 2 * bins - 1
-    - pen: 2 * bins .. 2 * bins + 3
-    - start: 2 * bins + 4
-    - pad: 2 * bins + 5
-    """
+    def normalize_absolute_coord(self, value: float, canvas_size: float) -> float:
+        canvas_size = max(float(canvas_size), 1e-6)
+        centered = (float(value) / canvas_size) - 0.5
+        return self._clamp_coord(centered)
 
-    def __init__(self, cfg: ActionTokenizerConfig | None = None):
-        self.cfg = cfg or ActionTokenizerConfig()
-        self.bins = self.cfg.bins
-        self.dx_offset = 0
-        self.dy_offset = self.bins
-        self.pen_offset = self.bins * 2
-        self.start_id = self.pen_offset + len(PEN_TO_ID)
-        self.pad_id = self.start_id + 1
-        self.vocab_size = self.pad_id + 1
-
-    # ── 原始范围量化（用于 move 步 + 兼容旧模式）──
     def _value_to_bin(self, value: float) -> int:
-        value = max(self.cfg.min_value, min(self.cfg.max_value, float(value)))
-        scale = (value - self.cfg.min_value) / (self.cfg.max_value - self.cfg.min_value)
-        idx = int(round(scale * (self.bins - 1)))
-        return max(0, min(self.bins - 1, idx))
+        clamped = self._clamp_coord(value)
+        return int(round(clamped * 100.0)) + 50
 
-    def _bin_to_value(self, idx: int) -> float:
-        idx = max(0, min(self.bins - 1, int(idx)))
-        scale = idx / max(self.bins - 1, 1)
-        return self.cfg.min_value + scale * (self.cfg.max_value - self.cfg.min_value)
+    def _bin_to_value(self, bin_idx: int) -> float:
+        return (int(bin_idx) - 50) / 100.0
 
-    # ── draw 专用量化（tight range，小步高精度）──
-    def _draw_value_to_bin(self, value: float) -> int:
-        lo, hi = self.cfg.draw_min_value, self.cfg.draw_max_value
-        value = max(lo, min(hi, float(value)))
-        scale = (value - lo) / (hi - lo)
-        idx = int(round(scale * (self.bins - 1)))
-        return max(0, min(self.bins - 1, idx))
+    def normalize_pen_state(self, pen_state: int | str) -> int:
+        if isinstance(pen_state, str):
+            if pen_state not in RAW_PEN_TO_ID:
+                raise ValueError(f"Unsupported pen_state string: {pen_state}")
+            return RAW_PEN_TO_ID[pen_state]
+        pen_id = int(pen_state)
+        if pen_id < 0 or pen_id >= NUM_PEN_STATES:
+            raise ValueError(f"pen_state must be in [0, 2], got {pen_state}")
+        return pen_id
 
-    def _draw_bin_to_value(self, idx: int) -> float:
-        lo, hi = self.cfg.draw_min_value, self.cfg.draw_max_value
-        idx = max(0, min(self.bins - 1, int(idx)))
-        scale = idx / max(self.bins - 1, 1)
-        return lo + scale * (hi - lo)
+    def encode_action(self, dx: float, dy: float, pen_state: int | str) -> int:
+        pen_id = self.normalize_pen_state(pen_state)
+        bin_x = self._value_to_bin(dx)
+        bin_y = self._value_to_bin(dy)
+        return pen_id * self.grid_cells + bin_x * self.grid_size + bin_y
 
-    # ── 兼容旧模式：用原始范围编码/解码 ──
-    def encode_step(self, dx: float, dy: float, pen_state: str) -> list[int]:
-        return [
-            self.dx_offset + self._value_to_bin(dx),
-            self.dy_offset + self._value_to_bin(dy),
-            self.pen_offset + PEN_TO_ID[pen_state],
-        ]
+    def decode_action(self, token_id: int) -> tuple[float, float, int]:
+        token_id = int(token_id)
+        if token_id == self.pad_id:
+            raise ValueError("pad_id does not decode to a Cartesian action.")
+        if token_id < 0 or token_id >= self.pad_id:
+            raise ValueError(f"token_id must be in [0, {self.pad_id - 1}], got {token_id}")
+        pen_state, offset = divmod(token_id, self.grid_cells)
+        bin_x, bin_y = divmod(offset, self.grid_size)
+        return self._bin_to_value(bin_x), self._bin_to_value(bin_y), pen_state
 
-    def end_padding_step(self) -> list[int]:
-        """A legal no-op action used to fill decoder input padding slots."""
-        return self.encode_step(0.0, 0.0, "end_all")
-
-    def decode_step(self, dx_token: int, dy_token: int, pen_token: int) -> dict:
-        dx_bin = int(dx_token) - self.dx_offset
-        dy_bin = int(dy_token) - self.dy_offset
-        pen_id = int(pen_token) - self.pen_offset
-        return {
-            "dx": self._bin_to_value(dx_bin),
-            "dy": self._bin_to_value(dy_bin),
-            "pen_state": ID_TO_PEN[pen_id],
-        }
-
-    def encode_strokes(self, strokes: list[dict]) -> list[int]:
+    def encode_sequence(self, actions: Iterable[dict | tuple | list | torch.Tensor]) -> list[int]:
         tokens: list[int] = []
-        for step in strokes:
-            tokens.extend(self.encode_step(step["dx"], step["dy"], step["pen_state"]))
+        for action in actions:
+            if isinstance(action, dict):
+                x = action.get("x", action.get("dx"))
+                y = action.get("y", action.get("dy"))
+                pen_state = action["pen_state"]
+            else:
+                x, y, pen_state = action
+            tokens.append(self.encode_action(float(x), float(y), pen_state))
         return tokens
 
-    # ── 双阶段模式：draw 专用 tight range 编码 ──
-    def encode_draw_step(self, dx: float, dy: float, pen_state: str) -> list[int]:
-        return [
-            self.dx_offset + self._draw_value_to_bin(dx),
-            self.dy_offset + self._draw_value_to_bin(dy),
-            self.pen_offset + PEN_TO_ID[pen_state],
-        ]
+    def decode_sequence(self, token_ids: Iterable[int] | torch.Tensor) -> list[dict[str, float | int]]:
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.detach().cpu().tolist()
+        decoded: list[dict[str, float | int]] = []
+        for token_id in token_ids:
+            if int(token_id) == self.pad_id:
+                continue
+            x, y, pen_state = self.decode_action(int(token_id))
+            decoded.append({"dx": x, "dy": y, "pen_state": pen_state})
+        return decoded
 
-    def decode_draw_step(self, dx_token: int, dy_token: int, pen_token: int) -> dict:
-        dx_bin = int(dx_token) - self.dx_offset
-        dy_bin = int(dy_token) - self.dy_offset
-        pen_id = int(pen_token) - self.pen_offset
-        return {
-            "dx": self._draw_bin_to_value(dx_bin),
-            "dy": self._draw_bin_to_value(dy_bin),
-            "pen_state": ID_TO_PEN[pen_id],
-        }
-
-    def encode_draw_strokes(self, strokes: list[dict]) -> list[int]:
-        """编码 draw 及之后的所有步（排除第一步 move），用 tight range。"""
-        tokens: list[int] = []
+    def strokes_to_cartesian_actions(
+        self,
+        strokes: Iterable[dict],
+        *,
+        canvas_size: float = 1.0,
+    ) -> list[dict[str, float | int]]:
+        x = 0.0
+        y = 0.0
+        actions: list[dict[str, float | int]] = []
         for step in strokes:
-            tokens.extend(self.encode_draw_step(step["dx"], step["dy"], step["pen_state"]))
-        return tokens
+            x += float(step["dx"])
+            y += float(step["dy"])
+            actions.append(
+                {
+                    "x": self.normalize_absolute_coord(x, canvas_size),
+                    "y": self.normalize_absolute_coord(y, canvas_size),
+                    "pen_state": self.normalize_pen_state(step["pen_state"]),
+                }
+            )
+        return actions
 
-    def decode_draw_tokens(self, tokens: list[int]) -> list[dict]:
-        """解码 draw 步的 tight range token 序列。"""
-        strokes = []
-        usable = len(tokens) - (len(tokens) % 3)
-        for idx in range(0, usable, 3):
-            dx_token, dy_token, pen_token = tokens[idx : idx + 3]
-            if pen_token < self.pen_offset or pen_token >= self.pen_offset + len(PEN_TO_ID):
-                break
-            step = self.decode_draw_step(dx_token, dy_token, pen_token)
-            strokes.append(step)
-            if step["pen_state"] == "end_all":
-                break
-        return strokes
-
-    def decode_tokens(self, tokens: list[int]) -> list[dict]:
-        strokes = []
-        usable = len(tokens) - (len(tokens) % 3)
-        for idx in range(0, usable, 3):
-            dx_token, dy_token, pen_token = tokens[idx : idx + 3]
-            if pen_token < self.pen_offset or pen_token >= self.pen_offset + len(PEN_TO_ID):
-                break
-            step = self.decode_step(dx_token, dy_token, pen_token)
-            strokes.append(step)
-            if step["pen_state"] == "end_all":
-                break
+    def cartesian_actions_to_strokes(self, actions: Iterable[dict | tuple | list | torch.Tensor]) -> list[dict[str, float | int]]:
+        prev_x = 0.0
+        prev_y = 0.0
+        strokes: list[dict[str, float | int]] = []
+        for action in actions:
+            if isinstance(action, dict):
+                x = float(action.get("x", action.get("dx")))
+                y = float(action.get("y", action.get("dy")))
+                pen_state = self.normalize_pen_state(action["pen_state"])
+            else:
+                x, y, pen_state = action
+                x = float(x)
+                y = float(y)
+                pen_state = self.normalize_pen_state(pen_state)
+            strokes.append({"dx": x - prev_x, "dy": y - prev_y, "pen_state": ID_TO_RAW_PEN[pen_state]})
+            prev_x, prev_y = x, y
         return strokes
 
     def valid_token_mask(self, positions: torch.Tensor) -> torch.Tensor:
-        """Return [*, vocab] mask for action-token type at each autoregressive position.
-
-        Position 0 predicts dx, position 1 predicts dy, position 2 predicts pen,
-        and then repeats. This keeps decoding in the valid sub-vocabulary.
-        """
-        mask = torch.zeros(*positions.shape, self.vocab_size, dtype=torch.bool, device=positions.device)
-        phase = positions % 3
-        mask[phase == 0, self.dx_offset : self.dx_offset + self.bins] = True
-        mask[phase == 1, self.dy_offset : self.dy_offset + self.bins] = True
-        mask[phase == 2, self.pen_offset : self.pen_offset + len(PEN_TO_ID)] = True
+        mask = torch.ones(*positions.shape, self.vocab_size, dtype=torch.bool, device=positions.device)
+        mask[..., self.pad_id] = False
         return mask
+
+    def encode_strokes(self, strokes: Iterable[dict]) -> list[int]:
+        return self.encode_sequence(self.strokes_to_cartesian_actions(strokes))
+
+    def decode_tokens(self, tokens: Iterable[int] | torch.Tensor) -> list[dict[str, float | int]]:
+        actions = self.decode_sequence(tokens)
+        return self.cartesian_actions_to_strokes(actions)
+
+
+class CompactActionTokenMapper:
+    def __init__(self, raw_token_ids: Iterable[int]):
+        unique = sorted({int(token_id) for token_id in raw_token_ids})
+        if not unique:
+            raise ValueError("No Cartesian action tokens found for compact vocabulary.")
+        self.raw_to_compact = {raw_token_id: idx for idx, raw_token_id in enumerate(unique)}
+        self.compact_to_raw = {idx: raw_token_id for idx, raw_token_id in enumerate(unique)}
+        self.action_vocab_size = len(unique)
+        self.pad_id = self.action_vocab_size
+        self.vocab_size = self.action_vocab_size + 1
+
+    @classmethod
+    def from_vocab_file(cls, path: str | Path) -> "CompactActionTokenMapper":
+        payload = torch.load(path) if str(path).endswith(".pt") else None
+        if payload is not None:
+            token_ids = payload["raw_token_ids"]
+            return cls(token_ids)
+        path = Path(path)
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        token_ids = [int(item["raw_token_id"]) for item in data["tokens"]]
+        return cls(token_ids)
+
+    def encode(self, raw_token_id: int) -> int:
+        raw_token_id = int(raw_token_id)
+        try:
+            return self.raw_to_compact[raw_token_id]
+        except KeyError as exc:
+            raise KeyError(f"raw token id {raw_token_id} is not in the observed Cartesian vocabulary") from exc
+
+    def decode(self, compact_token_id: int) -> int:
+        compact_token_id = int(compact_token_id)
+        if compact_token_id < 0 or compact_token_id >= self.action_vocab_size:
+            raise ValueError(f"not a compact Cartesian action token: {compact_token_id}")
+        return self.compact_to_raw[compact_token_id]
+
+
+ActionTokenizerConfig = CartesianTokenizerConfig
+StrokeActionTokenizer = CartesianActionTokenizer

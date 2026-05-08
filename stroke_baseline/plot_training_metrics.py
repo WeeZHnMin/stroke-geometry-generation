@@ -12,12 +12,14 @@ import matplotlib.pyplot as plt
 STEP_RE = re.compile(
     r"epoch=(?P<epoch>\d+)\s+step=(?P<step>\d+)/(?P<total_steps>\d+)\s+"
     r"loss=(?P<loss>[-+0-9.eE]+)\s+acc=(?P<token_acc>[-+0-9.eE]+)\s+"
-    r"dx=(?P<dx_acc>[-+0-9.eE]+)\s+dy=(?P<dy_acc>[-+0-9.eE]+)\s+pen=(?P<pen_acc>[-+0-9.eE]+)"
+    r"x_acc=(?P<x_acc>[-+0-9.eE]+)\s+y_acc=(?P<y_acc>[-+0-9.eE]+)\s+pen_acc=(?P<pen_acc>[-+0-9.eE]+)\s+"
+    r"xy_mae=(?P<xy_mae>[-+0-9.eE]+)"
 )
 EPOCH_RE = re.compile(
     r"epoch=(?P<epoch>\d+)\s+train_loss=(?P<train_loss>[-+0-9.eE]+)\s+"
     r"val_loss=(?P<val_loss>[-+0-9.eE]+)\s+val_acc=(?P<val_acc>[-+0-9.eE]+)\s+"
-    r"val_dx=(?P<val_dx>[-+0-9.eE]+)\s+val_dy=(?P<val_dy>[-+0-9.eE]+)\s+val_pen=(?P<val_pen>[-+0-9.eE]+)"
+    r"val_x_acc=(?P<val_x_acc>[-+0-9.eE]+)\s+val_y_acc=(?P<val_y_acc>[-+0-9.eE]+)\s+"
+    r"val_pen_acc=(?P<val_pen_acc>[-+0-9.eE]+)\s+val_xy_mae=(?P<val_xy_mae>[-+0-9.eE]+)"
 )
 
 
@@ -50,9 +52,10 @@ def parse_text_log(path: Path) -> tuple[list[dict], list[dict]]:
                     "total_steps": int(values["total_steps"]),
                     "loss": float(values["loss"]),
                     "token_acc": float(values["token_acc"]),
-                    "dx_acc": float(values["dx_acc"]),
-                    "dy_acc": float(values["dy_acc"]),
+                    "x_acc": float(values["x_acc"]),
+                    "y_acc": float(values["y_acc"]),
                     "pen_acc": float(values["pen_acc"]),
+                    "xy_mae": float(values["xy_mae"]),
                 }
             )
             continue
@@ -67,9 +70,10 @@ def parse_text_log(path: Path) -> tuple[list[dict], list[dict]]:
                     "val": {
                         "loss": float(values["val_loss"]),
                         "token_acc": float(values["val_acc"]),
-                        "dx_acc": float(values["val_dx"]),
-                        "dy_acc": float(values["val_dy"]),
-                        "pen_acc": float(values["val_pen"]),
+                        "x_acc": float(values["val_x_acc"]),
+                        "y_acc": float(values["val_y_acc"]),
+                        "pen_acc": float(values["val_pen_acc"]),
+                        "xy_mae": float(values["val_xy_mae"]),
                     },
                 }
             )
@@ -153,13 +157,13 @@ def main() -> None:
     plots = [
         ("loss", "Loss"),
         ("token_acc", "Token Accuracy"),
-        ("dx_acc", "DX Accuracy"),
-        ("dy_acc", "DY Accuracy"),
+        ("x_acc", "X Accuracy"),
+        ("y_acc", "Y Accuracy"),
         ("pen_acc", "Pen Accuracy"),
+        ("xy_mae", "XY MAE"),
     ]
     for ax, (metric, title) in zip(axes.flat, plots):
         plot_metric(ax, epoch_records, step_records, metric, title)
-    axes.flat[-1].axis("off")
 
     fig.suptitle(str(run_dir or args.log_file), fontsize=12)
     fig.savefig(output, dpi=180)

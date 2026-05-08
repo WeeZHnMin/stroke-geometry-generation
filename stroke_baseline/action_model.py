@@ -1,3 +1,4 @@
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -14,6 +15,37 @@ from .pretrained_encoder_decoder import (
 )
 
 
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack((-x2, x1), dim=-1).flatten(start_dim=-2)
+
+
+def apply_2d_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    coords: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _, _, _, head_dim = q.shape
+    if head_dim % 4 != 0:
+        raise ValueError("head_dim must be divisible by 4 for 2D RoPE.")
+    dim_1d = head_dim // 2
+    inv_freq = 1.0 / (
+        10000
+        ** (torch.arange(0, dim_1d, 2, device=q.device, dtype=torch.float32) / dim_1d)
+    )
+    freqs_x = torch.einsum("bs,d->bsd", coords[:, :, 0].float(), inv_freq)
+    freqs_y = torch.einsum("bs,d->bsd", coords[:, :, 1].float(), inv_freq)
+    freqs_x = torch.repeat_interleave(freqs_x, 2, dim=-1)
+    freqs_y = torch.repeat_interleave(freqs_y, 2, dim=-1)
+    freqs = torch.cat([freqs_x, freqs_y], dim=-1).unsqueeze(1)
+    sin_val = freqs.sin().to(dtype=q.dtype)
+    cos_val = freqs.cos().to(dtype=q.dtype)
+    q_embed = (q * cos_val) + (rotate_half(q) * sin_val)
+    k_embed = (k * cos_val) + (rotate_half(k) * sin_val)
+    return q_embed, k_embed
+
+
 @dataclass
 class ActionDecoderConfig:
     action_vocab_size: int
@@ -24,8 +56,13 @@ class ActionDecoderConfig:
     ff_mult: int = 4
     dropout: float = 0.1
     max_action_len: int = 384
-    attention_variant: str = "legacy"
+    attention_variant: str = "hetero"
     trend_kernel_size: int = 5
+    input_mode: str = "cpcf"
+    xy_hidden_dim: int = 128
+    pen_emb_dim: int = 32
+    input_kernel_size: int = 3
+    use_2d_rope: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -66,7 +103,6 @@ class CausalConv1d(nn.Module):
         if self.left_padding == 0:
             out = self.conv(x.transpose(1, 2)).transpose(1, 2)
             return out, None
-
         if buffer is None:
             buffer = torch.zeros(x.size(0), self.left_padding, x.size(2), dtype=x.dtype, device=x.device)
         else:
@@ -75,10 +111,43 @@ class CausalConv1d(nn.Module):
         out = self.conv(window.transpose(1, 2)).transpose(1, 2)
         return out, window[:, -self.left_padding :, :]
 
+
+class CPCFInputEncoder(nn.Module):
+    def __init__(self, cfg: ActionDecoderConfig):
+        super().__init__()
+        self.xy_mlp = nn.Sequential(
+            nn.Linear(2, cfg.xy_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(cfg.xy_hidden_dim, cfg.xy_hidden_dim),
+        )
+        self.pen_emb = nn.Embedding(5, cfg.pen_emb_dim)
+        self.fusion = CausalConv1d(cfg.xy_hidden_dim + cfg.pen_emb_dim, cfg.d_model, cfg.input_kernel_size)
+        self.out_act = nn.SiLU()
+
+    def forward(self, coords: torch.Tensor, pen_states: torch.Tensor) -> torch.Tensor:
+        xy_feat = self.xy_mlp(coords)
+        pen_feat = self.pen_emb(pen_states)
+        fused = torch.cat([xy_feat, pen_feat], dim=-1)
+        return self.out_act(self.fusion(fused))
+
+    def forward_step(
+        self,
+        coords: torch.Tensor,
+        pen_states: torch.Tensor,
+        buffer: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        xy_feat = self.xy_mlp(coords)
+        pen_feat = self.pen_emb(pen_states)
+        fused = torch.cat([xy_feat, pen_feat], dim=-1)
+        out, buffer = self.fusion.forward_step(fused, buffer)
+        return self.out_act(out), buffer
+
+
 class LegacyCachedTokenSelfAttention(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
-        assert cfg.d_model % cfg.n_heads == 0
+        if cfg.d_model % cfg.n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
         self.d_model = cfg.d_model
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.d_model // cfg.n_heads
@@ -102,13 +171,14 @@ class LegacyCachedTokenSelfAttention(nn.Module):
         x: torch.Tensor,
         causal_mask: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        del coords
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q = self._split_heads(q)
         k = self._split_heads(k)
         v = self._split_heads(v)
-
-        scores = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         scores = scores.masked_fill(causal_mask[None, None, :, :], torch.finfo(scores.dtype).min)
         if key_padding_mask is not None:
             scores = scores.masked_fill(key_padding_mask[:, None, None, :], torch.finfo(scores.dtype).min)
@@ -119,7 +189,9 @@ class LegacyCachedTokenSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         cache: dict[str, torch.Tensor | None],
+        coords: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
+        del coords
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q = self._split_heads(q)
         k = self._split_heads(k)
@@ -128,7 +200,7 @@ class LegacyCachedTokenSelfAttention(nn.Module):
         past_v = cache.get("self_v")
         k_all = k if past_k is None else torch.cat([past_k, k], dim=2)
         v_all = v if past_v is None else torch.cat([past_v, v], dim=2)
-        scores = (q @ k_all.transpose(-2, -1)) / (self.head_dim**0.5)
+        scores = (q @ k_all.transpose(-2, -1)) / math.sqrt(self.head_dim)
         attn = self.dropout(torch.softmax(scores, dim=-1))
         cache["self_k"] = k_all
         cache["self_v"] = v_all
@@ -138,49 +210,20 @@ class LegacyCachedTokenSelfAttention(nn.Module):
 class CachedTokenSelfAttention(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
-        assert cfg.d_model % cfg.n_heads == 0
-
+        if cfg.d_model % cfg.n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
         self.d_model = cfg.d_model
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.d_model // cfg.n_heads
-
         self.n_static_heads = cfg.n_heads // 2
         self.n_trend_heads = cfg.n_heads - self.n_static_heads
-
         self.q_proj = nn.Linear(cfg.d_model, cfg.d_model)
-
-        self.k_proj_static = nn.Linear(
-            cfg.d_model,
-            self.n_static_heads * self.head_dim,
-        )
-        self.v_proj_static = nn.Linear(
-            cfg.d_model,
-            self.n_static_heads * self.head_dim,
-        )
-
-        self.kernel_size = 5
-        self.causal_conv = nn.Conv1d(
-            in_channels=cfg.d_model,
-            out_channels=cfg.d_model,
-            kernel_size=self.kernel_size,
-            groups=cfg.d_model,
-        )
-        self.k_proj_trend = nn.Linear(
-            cfg.d_model,
-            self.n_trend_heads * self.head_dim,
-        )
-        self.v_proj_trend = nn.Linear(
-            cfg.d_model,
-            self.n_trend_heads * self.head_dim,
-        )
-
-        nn.init.zeros_(self.k_proj_trend.weight)
-        nn.init.zeros_(self.v_proj_trend.weight)
-        if self.k_proj_trend.bias is not None:
-            nn.init.zeros_(self.k_proj_trend.bias)
-        if self.v_proj_trend.bias is not None:
-            nn.init.zeros_(self.v_proj_trend.bias)
-
+        self.k_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
+        self.v_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
+        self.kernel_size = cfg.trend_kernel_size
+        self.causal_conv = nn.Conv1d(cfg.d_model, cfg.d_model, kernel_size=self.kernel_size, groups=cfg.d_model)
+        self.k_proj_trend = nn.Linear(cfg.d_model, self.n_trend_heads * self.head_dim)
+        self.v_proj_trend = nn.Linear(cfg.d_model, self.n_trend_heads * self.head_dim)
         self.out = nn.Linear(cfg.d_model, cfg.d_model)
         self.dropout = nn.Dropout(cfg.dropout)
 
@@ -200,50 +243,40 @@ class CachedTokenSelfAttention(nn.Module):
         x: torch.Tensor,
         causal_mask: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q = self.q_proj(x)
-        q = self._split_heads(q, self.n_heads)
-
-        k_static = self.k_proj_static(x)
-        v_static = self.v_proj_static(x)
-        k_static = self._split_heads(k_static, self.n_static_heads)
-        v_static = self._split_heads(v_static, self.n_static_heads)
-
+        del coords
+        q = self._split_heads(self.q_proj(x), self.n_heads)
+        k_static = self._split_heads(self.k_proj_static(x), self.n_static_heads)
+        v_static = self._split_heads(self.v_proj_static(x), self.n_static_heads)
         x_conv = F.pad(x.transpose(1, 2), (self.kernel_size - 1, 0))
-        x_conv = self.causal_conv(x_conv)
-        x_conv = x_conv.transpose(1, 2)
-        x_conv = F.silu(x_conv)
-
-        k_trend = self.k_proj_trend(x_conv)
-        v_trend = self.v_proj_trend(x_conv)
-        k_trend = self._split_heads(k_trend, self.n_trend_heads)
-        v_trend = self._split_heads(v_trend, self.n_trend_heads)
-
+        x_conv = F.silu(self.causal_conv(x_conv).transpose(1, 2))
+        k_trend = self._split_heads(self.k_proj_trend(x_conv), self.n_trend_heads)
+        v_trend = self._split_heads(self.v_proj_trend(x_conv), self.n_trend_heads)
         k = torch.cat([k_static, k_trend], dim=1)
         v = torch.cat([v_static, v_trend], dim=1)
-
-        scores = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         scores = scores.masked_fill(causal_mask[None, None, :, :], torch.finfo(scores.dtype).min)
         if key_padding_mask is not None:
             scores = scores.masked_fill(key_padding_mask[:, None, None, :], torch.finfo(scores.dtype).min)
         attn = self.dropout(torch.softmax(scores, dim=-1))
-
-        out = attn @ v
-        out = self._merge_heads(out)
-        return self.out(out)
+        return self.out(self._merge_heads(attn @ v))
 
     def forward_step(
         self,
         x: torch.Tensor,
         cache: dict[str, torch.Tensor | None],
+        coords: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
-        raise NotImplementedError("Streaming Conv1D cache for inference is pending")
+        del coords
+        raise NotImplementedError("Streaming cache is only supported for hetero attention.")
 
 
 class HeterogeneousCachedTokenSelfAttention(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
-        assert cfg.d_model % cfg.n_heads == 0
+        if cfg.d_model % cfg.n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
         if cfg.n_heads % 2 != 0:
             raise ValueError("hetero attention requires an even number of heads")
         self.d_model = cfg.d_model
@@ -251,6 +284,7 @@ class HeterogeneousCachedTokenSelfAttention(nn.Module):
         self.head_dim = cfg.d_model // cfg.n_heads
         self.n_static_heads = cfg.n_heads // 2
         self.n_trend_heads = cfg.n_heads - self.n_static_heads
+        self.use_2d_rope = cfg.use_2d_rope
         self.q_proj = nn.Linear(cfg.d_model, cfg.d_model)
         self.k_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
         self.v_proj_static = nn.Linear(cfg.d_model, self.n_static_heads * self.head_dim)
@@ -278,12 +312,25 @@ class HeterogeneousCachedTokenSelfAttention(nn.Module):
         bsz, _, seq_len, _ = x.shape
         return x.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
 
-    def _project_kv(self, x: torch.Tensor, x_conv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _project_qkv(
+        self,
+        x: torch.Tensor,
+        x_conv: torch.Tensor,
+        coords: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q = self._split_heads(self.q_proj(x), self.n_heads)
+        q_static = q[:, : self.n_static_heads]
+        q_trend = q[:, self.n_static_heads :]
         k_static = self._split_heads(self.k_proj_static(x), self.n_static_heads)
         v_static = self._split_heads(self.v_proj_static(x), self.n_static_heads)
+        if coords is not None and self.use_2d_rope:
+            q_static, k_static = apply_2d_rotary_pos_emb(q_static, k_static, coords)
         k_trend = self._split_heads(self.k_proj_trend(x_conv), self.n_trend_heads)
         v_trend = self._split_heads(self.v_proj_trend(x_conv), self.n_trend_heads)
-        return torch.cat([k_static, k_trend], dim=1), torch.cat([v_static, v_trend], dim=1)
+        q_all = torch.cat([q_static, q_trend], dim=1)
+        k_all = torch.cat([k_static, k_trend], dim=1)
+        v_all = torch.cat([v_static, v_trend], dim=1)
+        return q_all, k_all, v_all
 
     def _attend(
         self,
@@ -293,7 +340,7 @@ class HeterogeneousCachedTokenSelfAttention(nn.Module):
         causal_mask: torch.Tensor | None = None,
         key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        scores = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if causal_mask is not None:
             scores = scores.masked_fill(causal_mask[None, None, :, :], torch.finfo(scores.dtype).min)
         if key_padding_mask is not None:
@@ -306,21 +353,21 @@ class HeterogeneousCachedTokenSelfAttention(nn.Module):
         x: torch.Tensor,
         causal_mask: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q = self._split_heads(self.q_proj(x), self.n_heads)
         x_conv = self.trend_act(self.causal_conv(x))
-        k, v = self._project_kv(x, x_conv)
+        q, k, v = self._project_qkv(x, x_conv, coords=coords)
         return self._attend(q, k, v, causal_mask=causal_mask, key_padding_mask=key_padding_mask)
 
     def forward_step(
         self,
         x: torch.Tensor,
         cache: dict[str, torch.Tensor | None],
+        coords: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
-        q = self._split_heads(self.q_proj(x), self.n_heads)
         x_conv, conv_buffer = self.causal_conv.forward_step(x, cache.get("conv_buffer"))
         x_conv = self.trend_act(x_conv)
-        k, v = self._project_kv(x, x_conv)
+        q, k, v = self._project_qkv(x, x_conv, coords=coords)
         past_k = cache.get("self_k")
         past_v = cache.get("self_v")
         k_all = k if past_k is None else torch.cat([past_k, k], dim=2)
@@ -365,8 +412,9 @@ class ActionDecoderBlock(nn.Module):
         padding_mask: torch.Tensor | None,
         context: torch.Tensor,
         context_mask: torch.Tensor,
+        coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = x + self.dropout(self.self_attn(self.norm1(x), causal_mask, padding_mask))
+        x = x + self.dropout(self.self_attn(self.norm1(x), causal_mask, padding_mask, coords=coords))
         x = x + self.dropout(self.cross_attn(self.norm2(x), context, context_mask))
         x = x + self.dropout(self.ffn(self.norm3(x)))
         return x
@@ -380,8 +428,9 @@ class ActionDecoderBlock(nn.Module):
         x: torch.Tensor,
         cache: dict[str, torch.Tensor | None],
         context_mask: torch.Tensor,
+        coords: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
-        self_out, cache = self.self_attn.forward_step(self.norm1(x), cache)
+        self_out, cache = self.self_attn.forward_step(self.norm1(x), cache, coords=coords)
         x = x + self.dropout(self_out)
         cross_k = cache.get("cross_k")
         cross_v = cache.get("cross_v")
@@ -396,61 +445,114 @@ class ActionTokenDecoder(nn.Module):
     def __init__(self, cfg: ActionDecoderConfig):
         super().__init__()
         self.cfg = cfg
-        self.token_emb = nn.Embedding(cfg.action_vocab_size, cfg.d_model, padding_idx=cfg.pad_token_id)
-        self.pos_emb = nn.Embedding(cfg.max_action_len, cfg.d_model)
+        self.token_emb = None
+        self.pos_emb = None
+        self.input_encoder = None
+        if cfg.input_mode == "token":
+            self.token_emb = nn.Embedding(cfg.action_vocab_size, cfg.d_model, padding_idx=cfg.pad_token_id)
+            self.pos_emb = nn.Embedding(cfg.max_action_len, cfg.d_model)
+        elif cfg.input_mode == "cpcf":
+            self.input_encoder = CPCFInputEncoder(cfg)
+        else:
+            raise ValueError(f"Unsupported input_mode: {cfg.input_mode}")
         self.blocks = nn.ModuleList([ActionDecoderBlock(cfg) for _ in range(cfg.num_decoder_layers)])
         self.norm = nn.LayerNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.action_vocab_size)
+
+    def _build_inputs(
+        self,
+        decoder_input_ids: torch.Tensor | None,
+        decoder_coords: torch.Tensor | None,
+        decoder_pen_states: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.cfg.input_mode == "token":
+            if decoder_input_ids is None:
+                raise ValueError("decoder_input_ids is required for token input mode.")
+            seq_len = decoder_input_ids.size(1)
+            positions = torch.arange(seq_len, device=decoder_input_ids.device)
+            x = self.token_emb(decoder_input_ids) + self.pos_emb(positions)[None, :, :]
+            return x, None
+        if decoder_coords is None or decoder_pen_states is None:
+            raise ValueError("decoder_coords and decoder_pen_states are required for CPCF input mode.")
+        return self.input_encoder(decoder_coords, decoder_pen_states), decoder_coords
 
     def forward(
         self,
         context: torch.Tensor,
         context_mask: torch.Tensor,
-        decoder_input_ids: torch.Tensor,
+        decoder_input_ids: torch.Tensor | None = None,
+        decoder_coords: torch.Tensor | None = None,
+        decoder_pen_states: torch.Tensor | None = None,
         target_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        seq_len = decoder_input_ids.size(1)
-        positions = torch.arange(seq_len, device=decoder_input_ids.device)
-        x = self.token_emb(decoder_input_ids) + self.pos_emb(positions)[None, :, :]
+        if self.cfg.input_mode == "token":
+            seq_len = decoder_input_ids.size(1)
+            padding_mask = decoder_input_ids == self.cfg.pad_token_id
+        else:
+            seq_len = decoder_coords.size(1)
+            padding_mask = decoder_pen_states == 4
+        x, coords = self._build_inputs(decoder_input_ids, decoder_coords, decoder_pen_states)
         causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=decoder_input_ids.device, dtype=torch.bool),
+            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
             diagonal=1,
         )
-        padding_mask = decoder_input_ids == self.cfg.pad_token_id
         if target_mask is not None:
             padding_mask = padding_mask | ~target_mask.bool()
-
         for block in self.blocks:
-            x = block(x, causal_mask, padding_mask, context, context_mask)
+            x = block(x, causal_mask, padding_mask, context, context_mask, coords=coords)
         hidden = self.norm(x)
         return {"hidden": hidden, "logits": self.lm_head(hidden)}
 
-    def init_cache(self, context: torch.Tensor) -> list[dict[str, torch.Tensor | None]]:
-        return [block.init_cross_cache(context) for block in self.blocks]
+    def init_cache(self, context: torch.Tensor) -> dict[str, object]:
+        return {
+            "input_conv_buffer": None,
+            "blocks": [block.init_cross_cache(context) for block in self.blocks],
+        }
 
     def decode_step(
         self,
         context: torch.Tensor,
         context_mask: torch.Tensor,
-        input_id: torch.Tensor,
-        step_idx: int | torch.Tensor,
-        cache: list[dict[str, torch.Tensor | None]] | None = None,
-    ) -> tuple[dict[str, torch.Tensor], list[dict[str, torch.Tensor | None]]]:
-        if input_id.dim() == 1:
-            input_id = input_id[:, None]
+        input_id: torch.Tensor | None = None,
+        input_coords: torch.Tensor | None = None,
+        input_pen_states: torch.Tensor | None = None,
+        step_idx: int | torch.Tensor = 0,
+        cache: dict[str, object] | None = None,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
         if cache is None:
             cache = self.init_cache(context)
-        if isinstance(step_idx, int):
-            pos = torch.full((1,), step_idx, device=input_id.device, dtype=torch.long)
+        if self.cfg.input_mode == "token":
+            if input_id is None:
+                raise ValueError("input_id is required for token input mode.")
+            if input_id.dim() == 1:
+                input_id = input_id[:, None]
+            if isinstance(step_idx, int):
+                pos = torch.full((1,), step_idx, device=input_id.device, dtype=torch.long)
+            else:
+                pos = step_idx.to(device=input_id.device, dtype=torch.long).reshape(1)
+            x = self.token_emb(input_id) + self.pos_emb(pos)[None, :, :]
+            coords = None
         else:
-            pos = step_idx.to(device=input_id.device, dtype=torch.long).reshape(1)
-        x = self.token_emb(input_id) + self.pos_emb(pos)[None, :, :]
-        new_cache = []
-        for block, layer_cache in zip(self.blocks, cache):
-            x, layer_cache = block.forward_step(x, layer_cache, context_mask)
-            new_cache.append(layer_cache)
+            if input_coords is None or input_pen_states is None:
+                raise ValueError("input_coords and input_pen_states are required for CPCF input mode.")
+            if input_coords.dim() == 2:
+                input_coords = input_coords[:, None, :]
+            if input_pen_states.dim() == 1:
+                input_pen_states = input_pen_states[:, None]
+            x, input_conv_buffer = self.input_encoder.forward_step(
+                input_coords,
+                input_pen_states,
+                cache.get("input_conv_buffer"),
+            )
+            cache["input_conv_buffer"] = input_conv_buffer
+            coords = input_coords
+        new_blocks = []
+        for block, layer_cache in zip(self.blocks, cache["blocks"]):
+            x, layer_cache = block.forward_step(x, layer_cache, context_mask, coords=coords)
+            new_blocks.append(layer_cache)
+        cache["blocks"] = new_blocks
         hidden = self.norm(x)
-        return {"hidden": hidden, "logits": self.lm_head(hidden)}, new_cache
+        return {"hidden": hidden, "logits": self.lm_head(hidden)}, cache
 
 
 class TextConditionedActionModel(nn.Module):
@@ -468,8 +570,6 @@ class TextConditionedActionModel(nn.Module):
             self.context_proj = nn.Linear(self.text_encoder.hidden_size, decoder_cfg.d_model)
         else:
             self.context_proj = nn.Identity()
-        # 双阶段: 回归预测绝对起点位置
-        self.start_head = nn.Linear(decoder_cfg.d_model, 2)
 
     def encode_text(self, prompts: list[str]) -> dict[str, torch.Tensor]:
         text = self.text_encoder(prompts=prompts, max_text_len=self.max_text_len)
@@ -478,33 +578,40 @@ class TextConditionedActionModel(nn.Module):
     def forward(
         self,
         prompts: list[str],
-        decoder_input_ids: torch.Tensor,
+        decoder_input_ids: torch.Tensor | None = None,
+        decoder_coords: torch.Tensor | None = None,
+        decoder_pen_states: torch.Tensor | None = None,
         target_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         text = self.encode_text(prompts)
-        # 从编码器输出中预测起点位置
-        start_pred = self.start_head(text["context"][:, 0, :])  # [B, 2]
-        dec_out = self.decoder(
+        return self.decoder(
             context=text["context"],
             context_mask=text["context_mask"],
             decoder_input_ids=decoder_input_ids,
+            decoder_coords=decoder_coords,
+            decoder_pen_states=decoder_pen_states,
             target_mask=target_mask,
         )
-        return {"start_pred": start_pred, **dec_out}
-
-    def predict_start(self, prompts: list[str]) -> torch.Tensor:
-        text = self.encode_text(prompts)
-        return self.start_head(text["context"][:, 0, :])  # [B, 2]
 
     def decode_step(
         self,
         context: torch.Tensor,
         context_mask: torch.Tensor,
-        input_id: torch.Tensor,
-        step_idx: int | torch.Tensor,
-        cache: list[dict[str, torch.Tensor | None]] | None = None,
-    ) -> tuple[dict[str, torch.Tensor], list[dict[str, torch.Tensor | None]]]:
-        return self.decoder.decode_step(context, context_mask, input_id, step_idx, cache)
+        input_id: torch.Tensor | None = None,
+        input_coords: torch.Tensor | None = None,
+        input_pen_states: torch.Tensor | None = None,
+        step_idx: int | torch.Tensor = 0,
+        cache: dict[str, object] | None = None,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
+        return self.decoder.decode_step(
+            context,
+            context_mask,
+            input_id=input_id,
+            input_coords=input_coords,
+            input_pen_states=input_pen_states,
+            step_idx=step_idx,
+            cache=cache,
+        )
 
 
 def build_default_action_model(
