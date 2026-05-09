@@ -25,7 +25,33 @@ def move_batch_to_device(batch: dict, device: torch.device) -> dict:
     return {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
 
 
-def compute_loss(batch: dict, out: dict, tokenizer: StrokeActionTokenizer) -> tuple[torch.Tensor, dict[str, float]]:
+def neighbor_smoothed_ce(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    sigma: float,
+    window: int,
+) -> torch.Tensor:
+    if sigma <= 0:
+        return F.cross_entropy(logits, target)
+    vocab_size = logits.size(-1)
+    radius = max(1, int(window))
+    offsets = torch.arange(-radius, radius + 1, device=logits.device)
+    neighbor_idx = (target[:, None] + offsets[None, :]).clamp(0, vocab_size - 1)
+    weights = torch.exp(-0.5 * (offsets.to(logits.dtype) / float(sigma)).pow(2))
+    weights = weights[None, :].expand_as(neighbor_idx).clone()
+    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    log_probs = F.log_softmax(logits, dim=-1)
+    return -(log_probs.gather(dim=-1, index=neighbor_idx) * weights).sum(dim=-1).mean()
+
+
+def compute_loss(
+    batch: dict,
+    out: dict,
+    tokenizer: StrokeActionTokenizer,
+    *,
+    neighbor_label_sigma: float = 0.0,
+    neighbor_label_window: int = 4,
+) -> tuple[torch.Tensor, dict[str, float]]:
     target = batch["target_ids"]
     positions = torch.arange(target.size(1), device=target.device)[None, :].expand_as(target)
     valid = target != -100
@@ -38,7 +64,12 @@ def compute_loss(batch: dict, out: dict, tokenizer: StrokeActionTokenizer) -> tu
 
     if phase0.any():
         dx_target = target[phase0] - tokenizer.dx_offset
-        dx_loss = F.cross_entropy(out["dx_logits"][phase0], dx_target)
+        dx_loss = neighbor_smoothed_ce(
+            out["dx_logits"][phase0],
+            dx_target,
+            sigma=neighbor_label_sigma,
+            window=neighbor_label_window,
+        )
         loss_terms.append(dx_loss)
         metrics["dx_loss"] = float(dx_loss.item())
     else:
@@ -46,7 +77,12 @@ def compute_loss(batch: dict, out: dict, tokenizer: StrokeActionTokenizer) -> tu
 
     if phase1.any():
         dy_target = target[phase1] - tokenizer.dy_offset
-        dy_loss = F.cross_entropy(out["dy_logits"][phase1], dy_target)
+        dy_loss = neighbor_smoothed_ce(
+            out["dy_logits"][phase1],
+            dy_target,
+            sigma=neighbor_label_sigma,
+            window=neighbor_label_window,
+        )
         loss_terms.append(dy_loss)
         metrics["dy_loss"] = float(dy_loss.item())
     else:
@@ -201,7 +237,13 @@ def train_one_epoch(model, loader, optimizer, device, args, tokenizer, epoch, st
             target_mask=batch["target_mask"],
             coords=batch.get("coords"),
         )
-        loss, metrics = compute_loss(batch, out, tokenizer)
+        loss, metrics = compute_loss(
+            batch,
+            out,
+            tokenizer,
+            neighbor_label_sigma=args.neighbor_label_sigma,
+            neighbor_label_window=args.neighbor_label_window,
+        )
         loss.backward()
         torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], args.grad_clip)
         optimizer.step()
@@ -239,7 +281,13 @@ def evaluate(model, loader, device, tokenizer, args):
             target_mask=batch["target_mask"],
             coords=batch.get("coords"),
         )
-        _, metrics = compute_loss(batch, out, tokenizer)
+        _, metrics = compute_loss(
+            batch,
+            out,
+            tokenizer,
+            neighbor_label_sigma=args.neighbor_label_sigma,
+            neighbor_label_window=args.neighbor_label_window,
+        )
         update_sums(totals, counts, metrics)
     return average(totals, counts)
 
@@ -273,6 +321,8 @@ def main() -> None:
     parser.add_argument("--decoder-only-pretrain", action="store_true", help="Disable text conditioning and cross-attention for decoder-only pretraining.")
     parser.add_argument("--use-distance-bias", action="store_true", help="Enable MLP distance bias in self-attention.")
     parser.add_argument("--distance-bias-hidden", type=int, default=32)
+    parser.add_argument("--neighbor-label-sigma", type=float, default=0.0, help="Gaussian neighbor-label sigma for ordinal dx/dy CE. 0 keeps hard CE.")
+    parser.add_argument("--neighbor-label-window", type=int, default=4, help="Number of neighboring dx/dy bins on each side to include for smoothed CE.")
     parser.add_argument("--dataset-check-ranges", action="store_true", help="Validate dx/dy range while indexing the dataset.")
     parser.add_argument("--dataset-index-progress-every", type=int, default=10000)
     parser.add_argument("--log-every", type=int, default=20)
