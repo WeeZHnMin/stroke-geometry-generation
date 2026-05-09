@@ -55,6 +55,9 @@ def _decoder_input_with_end_padding(action_tokenizer: StrokeActionTokenizer, max
 
 
 def _build_coords_from_strokes(strokes: list[dict], max_action_len: int) -> torch.Tensor:
+    """Each stroke step occupies 3 consecutive sequence positions, all sharing
+    the same canvas position (the position right BEFORE the action is applied).
+    After the 3 positions are filled the running (x, y) is advanced by (dx, dy)."""
     coords = torch.zeros(max_action_len, 2, dtype=torch.float32)
     if not strokes:
         return coords
@@ -75,6 +78,19 @@ def _build_coords_from_strokes(strokes: list[dict], max_action_len: int) -> torc
         x += dx
         y += dy
     return coords
+
+
+def _build_remaining_log(seq_len: int, max_action_len: int) -> torch.Tensor:
+    """Per-position regression target: log(remaining_tokens) for valid positions.
+
+    At position p ∈ [0, seq_len), value = log(seq_len - p). Positions beyond
+    seq_len are zero-filled and masked out via target_mask in the loss.
+    """
+    out = torch.zeros(max_action_len, dtype=torch.float32)
+    if seq_len > 0:
+        positions = torch.arange(seq_len, dtype=torch.float32)
+        out[:seq_len] = torch.log((seq_len - positions).clamp_min(1.0))
+    return out
 
 
 def _tensor_from_list(values: list, *, dtype: torch.dtype) -> torch.Tensor:
@@ -200,6 +216,7 @@ class ActionTokenJsonlDataset(_IndexedJsonlDataset):
             "decoder_input_ids": decoder_input,
             "target_ids": target,
             "target_mask": target_mask,
+            "remaining_log": _build_remaining_log(seq_len, self.max_action_len),
             "length": torch.tensor(seq_len, dtype=torch.long),
         }
 
@@ -267,5 +284,6 @@ class TwoStageActionTokenJsonlDataset(_IndexedJsonlDataset):
             "decoder_input_ids": decoder_input,
             "target_ids": target,
             "target_mask": target_mask,
+            "remaining_log": _build_remaining_log(seq_len, self.max_action_len),
             "length": torch.tensor(seq_len, dtype=torch.long),
         }

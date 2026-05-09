@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -8,6 +9,10 @@ from .action_model import ActionDecoderConfig, TextConditionedActionModel
 from .action_tokenizer import ActionTokenizerConfig, StrokeActionTokenizer
 from .pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR
 from .visualize import save_strokes_png
+
+# Stop generation when length_head says ≤ 1.5 tokens remain. The 1.5 (vs. 1.0)
+# absorbs minor prediction noise without burning extra steps.
+_STOP_LOG_REMAINING = math.log(1.5)
 
 
 def load_model(checkpoint_path: str | Path, device: torch.device, text_encoder_dir: str | None = None):
@@ -23,7 +28,6 @@ def load_model(checkpoint_path: str | Path, device: torch.device, text_encoder_d
     )
     model.decoder.load_state_dict(state["decoder"])
     model.context_proj.load_state_dict(state["context_proj"])
-    # 双阶段: 加载 start_head（如果存在）
     if "start_head" in state:
         model.start_head.load_state_dict(state["start_head"])
     model.to(device)
@@ -48,7 +52,7 @@ def generate_tokens(
     max_steps: int = 170,
     device: torch.device | str = "cpu",
 ) -> list[int]:
-    """单阶段推理: 自回归预测所有步骤（含第一步 move）。"""
+    """单阶段推理: 自回归预测所有步骤(含第一步 move)。"""
     if model.text_encoder is None:
         context = None
         context_mask = None
@@ -81,7 +85,10 @@ def generate_tokens(
             step = tokenizer.decode_step(tokens[-3], tokens[-2], tokens[-1])
             x += float(step["dx"])
             y += float(step["dy"])
-            if step["pen_state"] == "end_all":
+            log_remaining = float(out["length_pred"][0, 0].item())
+            if log_remaining <= _STOP_LOG_REMAINING:
+                break
+            if any(tok == tokenizer.pad_id for tok in tokens[-3:]):
                 break
     return tokens
 
@@ -94,14 +101,9 @@ def generate_two_stage(
     max_steps: int = 170,
     device: torch.device | str = "cpu",
 ) -> list[dict]:
-    """双阶段推理:
-       1. 回归预测起点位置 (start_x, start_y)
-       2. 自回归预测 draw 步的离散 token（tight range + 通用 pen token）
-    """
-    # 阶段1: 预测起点
-    start_pred = model.predict_start([prompt])[0].detach().cpu()  # [2]
+    """双阶段推理: 1) 回归预测起点位置; 2) 自回归预测 draw 步的离散 token。"""
+    start_pred = model.predict_start([prompt])[0].detach().cpu()
     start_x, start_y = float(start_pred[0]), float(start_pred[1])
-
     strokes = [{"dx": start_x, "dy": start_y, "pen_state": "move"}]
 
     text = model.encode_text([prompt])
@@ -127,14 +129,14 @@ def generate_two_stage(
         input_id = torch.tensor([token_id], dtype=torch.long, device=device)
 
         if pos % 3 == 2:
-            # 用 draw tokenizer 解码
-            step = tokenizer.decode_draw_step(
-                tokens[-3], tokens[-2], tokens[-1]
-            )
+            step = tokenizer.decode_draw_step(tokens[-3], tokens[-2], tokens[-1])
             strokes.append(step)
             x += float(step["dx"])
             y += float(step["dy"])
-            if step["pen_state"] == "end_all":
+            log_remaining = float(out["length_pred"][0, 0].item())
+            if log_remaining <= _STOP_LOG_REMAINING:
+                break
+            if any(tok == tokenizer.pad_id for tok in tokens[-3:]):
                 break
 
     return strokes

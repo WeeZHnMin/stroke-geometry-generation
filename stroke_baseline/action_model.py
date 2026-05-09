@@ -247,7 +247,7 @@ class CachedTokenSelfAttention(nn.Module):
         self.dropout = nn.Dropout(cfg.dropout)
 
     def init_state(self) -> dict[str, torch.Tensor | None]:
-        return {"self_k": None, "self_v": None}
+        return {"self_k": None, "self_v": None, "conv_buffer": None, "coords": None}
 
     def _split_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
         bsz, seq_len, _ = x.shape
@@ -257,6 +257,29 @@ class CachedTokenSelfAttention(nn.Module):
         bsz, _, seq_len, _ = x.shape
         return x.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
 
+    def _build_kv(self, x: torch.Tensor, x_conv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        k_static = self._split_heads(self.k_proj_static(x), self.n_static_heads)
+        v_static = self._split_heads(self.v_proj_static(x), self.n_static_heads)
+        k_trend = self._split_heads(self.k_proj_trend(x_conv), self.n_trend_heads)
+        v_trend = self._split_heads(self.v_proj_trend(x_conv), self.n_trend_heads)
+        return torch.cat([k_static, k_trend], dim=1), torch.cat([v_static, v_trend], dim=1)
+
+    def _conv_step(
+        self,
+        x: torch.Tensor,
+        buffer: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: [B, 1, C]; buffer keeps the last (kernel_size - 1) frames.
+        pad_len = self.kernel_size - 1
+        if buffer is None:
+            buffer = torch.zeros(x.size(0), pad_len, x.size(2), dtype=x.dtype, device=x.device)
+        else:
+            buffer = buffer[:, -pad_len:, :]
+        window = torch.cat([buffer, x], dim=1)  # [B, kernel_size, C]
+        out = self.causal_conv(window.transpose(1, 2)).transpose(1, 2)  # [B, 1, C]
+        new_buffer = window[:, 1:, :]
+        return out, new_buffer
+
     def forward(
         self,
         x: torch.Tensor,
@@ -264,26 +287,13 @@ class CachedTokenSelfAttention(nn.Module):
         key_padding_mask: torch.Tensor | None = None,
         coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q = self.q_proj(x)
-        q = self._split_heads(q, self.n_heads)
-
-        k_static = self.k_proj_static(x)
-        v_static = self.v_proj_static(x)
-        k_static = self._split_heads(k_static, self.n_static_heads)
-        v_static = self._split_heads(v_static, self.n_static_heads)
+        q = self._split_heads(self.q_proj(x), self.n_heads)
 
         x_conv = F.pad(x.transpose(1, 2), (self.kernel_size - 1, 0))
-        x_conv = self.causal_conv(x_conv)
-        x_conv = x_conv.transpose(1, 2)
+        x_conv = self.causal_conv(x_conv).transpose(1, 2)
         x_conv = F.silu(x_conv)
 
-        k_trend = self.k_proj_trend(x_conv)
-        v_trend = self.v_proj_trend(x_conv)
-        k_trend = self._split_heads(k_trend, self.n_trend_heads)
-        v_trend = self._split_heads(v_trend, self.n_trend_heads)
-
-        k = torch.cat([k_static, k_trend], dim=1)
-        v = torch.cat([v_static, v_trend], dim=1)
+        k, v = self._build_kv(x, x_conv)
         if coords is not None:
             q, k = apply_2d_rotary_pos_emb(q, k, coords)
 
@@ -292,10 +302,7 @@ class CachedTokenSelfAttention(nn.Module):
         if key_padding_mask is not None:
             scores = scores.masked_fill(key_padding_mask[:, None, None, :], torch.finfo(scores.dtype).min)
         attn = self.dropout(torch.softmax(scores, dim=-1))
-
-        out = attn @ v
-        out = self._merge_heads(out)
-        return self.out(out)
+        return self.out(self._merge_heads(attn @ v))
 
     def forward_step(
         self,
@@ -303,33 +310,29 @@ class CachedTokenSelfAttention(nn.Module):
         cache: dict[str, torch.Tensor | None],
         coords: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
-        q = self.q_proj(x)
-        q = self._split_heads(q, self.n_heads)
+        q = self._split_heads(self.q_proj(x), self.n_heads)
 
-        x_conv, conv_buffer = self.causal_conv.forward_step(x, cache.get("conv_buffer"))
-        x_conv = self.trend_act(x_conv)
-        k, v = self._project_kv(x, x_conv)
+        x_conv, conv_buffer = self._conv_step(x, cache.get("conv_buffer"))
+        x_conv = F.silu(x_conv)
+        k, v = self._build_kv(x, x_conv)
 
         past_k = cache.get("self_k")
         past_v = cache.get("self_v")
         past_coords = cache.get("coords")
-        k_all = k if past_k is None else torch.cat([past_k, k], dim=2)
+        k_all_raw = k if past_k is None else torch.cat([past_k, k], dim=2)
         v_all = v if past_v is None else torch.cat([past_v, v], dim=2)
+        k_all = k_all_raw
 
-        dist_bias = None
-        coord_all = None
         if coords is not None:
-            if past_coords is None:
-                coord_all = coords
-            else:
-                coord_all = torch.cat([past_coords, coords], dim=1)
-            q, k_all = apply_2d_rotary_pos_emb(q, k_all, coords, coord_all)
-            if self.use_distance_bias:
-                dist_bias = self._distance_bias(coord_all, coords)
+            coord_all = coords if past_coords is None else torch.cat([past_coords, coords], dim=1)
+            q, k_all = apply_2d_rotary_pos_emb(q, k_all_raw, coords, coord_all)
             cache["coords"] = coord_all
 
-        out = self._attend(q, k_all, v_all, distance_bias=dist_bias)
-        cache["self_k"] = k_all
+        scores = (q @ k_all.transpose(-2, -1)) / (self.head_dim**0.5)
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+        out = self.out(self._merge_heads(attn @ v_all))
+
+        cache["self_k"] = k_all_raw
         cache["self_v"] = v_all
         cache["conv_buffer"] = conv_buffer
         return out, cache
@@ -550,10 +553,14 @@ class ActionTokenDecoder(nn.Module):
         self.dy_head: nn.Linear | None = None
         self.pen_head: nn.Linear | None = None
         self.lm_head: nn.Linear | None = None
+        self.length_head: nn.Linear | None = None
         if cfg.dx_vocab_size is not None and cfg.dy_vocab_size is not None and cfg.pen_vocab_size is not None:
             self.dx_head = nn.Linear(cfg.d_model, cfg.dx_vocab_size)
             self.dy_head = nn.Linear(cfg.d_model, cfg.dy_vocab_size)
             self.pen_head = nn.Linear(cfg.d_model, cfg.pen_vocab_size)
+            # Predicts log(remaining_tokens + eps) at every position; supplies a
+            # dense, length-aware stop signal that replaces an explicit EOS class.
+            self.length_head = nn.Linear(cfg.d_model, 1)
         else:
             self.lm_head = nn.Linear(cfg.d_model, cfg.action_vocab_size)
 
@@ -586,6 +593,7 @@ class ActionTokenDecoder(nn.Module):
             "dx_logits": self.dx_head(hidden),
             "dy_logits": self.dy_head(hidden),
             "pen_logits": self.pen_head(hidden),
+            "length_pred": self.length_head(hidden).squeeze(-1),
         }
 
     def init_cache(self, context: torch.Tensor | None) -> list[dict[str, torch.Tensor | None]]:
@@ -621,6 +629,7 @@ class ActionTokenDecoder(nn.Module):
             "dx_logits": self.dx_head(hidden),
             "dy_logits": self.dy_head(hidden),
             "pen_logits": self.pen_head(hidden),
+            "length_pred": self.length_head(hidden).squeeze(-1),
         }, new_cache
 
 

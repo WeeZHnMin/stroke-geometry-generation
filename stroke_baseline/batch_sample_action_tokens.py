@@ -34,12 +34,27 @@ def safe_name(text: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Batch sample Chinese prompts from action-token model.")
+    parser = argparse.ArgumentParser(description="Batch sample prompts from action-token model.")
     parser.add_argument("--checkpoint", type=str, default="runs/stroke_action_tokens_chinese_mvp/checkpoint.pt")
     parser.add_argument("--output-dir", type=str, default="runs/stroke_action_tokens_chinese_mvp/samples")
     parser.add_argument("--max-steps", type=int, default=170)
     parser.add_argument("--text-encoder-dir", type=str, default=None)
     parser.add_argument("--two-stage", action="store_true", help="双阶段推理模式")
+    parser.add_argument(
+        "--prompts",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Override DEFAULT_PROMPTS. For decoder-only-pretrain checkpoints "
+             "the prompt content is ignored anyway — pass placeholder labels "
+             "(e.g. shape names) so the output filenames are meaningful.",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="How many samples to generate per prompt (default 1).",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -47,15 +62,22 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = load_model(args.checkpoint, device, text_encoder_dir=args.text_encoder_dir)
 
+    base_prompts = args.prompts if args.prompts else DEFAULT_PROMPTS
+    expanded_prompts = []
+    for p in base_prompts:
+        for k in range(args.repeats):
+            expanded_prompts.append((p, k))
+
     summary = []
-    for idx, prompt in enumerate(DEFAULT_PROMPTS, start=1):
+    for idx, (prompt, repeat_idx) in enumerate(expanded_prompts, start=1):
         if args.two_stage:
             strokes = generate_two_stage(model, tokenizer, prompt, max_steps=args.max_steps, device=device)
             tokens = None
         else:
             tokens = generate_tokens(model, tokenizer, prompt, max_steps=args.max_steps, device=device)
             strokes = tokenizer.decode_tokens(tokens)
-        stem = f"{idx:02d}_{safe_name(prompt)}"
+        suffix = f"_r{repeat_idx}" if args.repeats > 1 else ""
+        stem = f"{idx:02d}_{safe_name(prompt)}{suffix}"
         png_path = output_dir / f"{stem}.png"
         json_path = output_dir / f"{stem}.json"
         save_strokes_png(strokes, png_path, title=prompt)

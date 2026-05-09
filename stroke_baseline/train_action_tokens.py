@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader, random_split
 from .action_dataset import ActionTokenJsonlDataset, TwoStageActionTokenJsonlDataset
 from .action_model import ActionDecoderConfig, TextConditionedActionModel
 from .action_tokenizer import ActionTokenizerConfig, StrokeActionTokenizer
-from .dataset import PEN_TO_ID
 from .pretrained_encoder_decoder import DEFAULT_TEXT_ENCODER_DIR
 
 
@@ -64,6 +63,29 @@ def compute_loss(batch: dict, out: dict, tokenizer: StrokeActionTokenizer) -> tu
     if not loss_terms:
         raise ValueError("No valid targets found in batch")
     loss = torch.stack(loss_terms).mean()
+
+    # Countdown regression: log(remaining_tokens) at every valid position.
+    # Dense per-position label dodges the "single EOS" imbalance — small
+    # prediction errors translate to small early/late stops at sample time.
+    if "remaining_log" in batch and "length_pred" in out:
+        valid_mask = batch["target_mask"].bool()
+        if valid_mask.any():
+            length_loss = F.smooth_l1_loss(
+                out["length_pred"][valid_mask],
+                batch["remaining_log"][valid_mask],
+            )
+            loss = loss + 0.1 * length_loss
+            metrics["length_loss"] = float(length_loss.item())
+            with torch.no_grad():
+                pred_steps = out["length_pred"][valid_mask].exp()
+                target_steps = batch["remaining_log"][valid_mask].exp()
+                metrics["length_mae_steps"] = float((pred_steps - target_steps).abs().mean().item())
+        else:
+            metrics["length_loss"] = float("nan")
+            metrics["length_mae_steps"] = float("nan")
+    else:
+        metrics["length_loss"] = float("nan")
+        metrics["length_mae_steps"] = float("nan")
 
     # 如果 batch 中有 start_position，加上回归损失
     if "start_position" in batch:
@@ -300,7 +322,7 @@ def main() -> None:
         pad_token_id=action_tokenizer.pad_id,
         dx_vocab_size=action_tokenizer.bins,
         dy_vocab_size=action_tokenizer.bins,
-        pen_vocab_size=len(PEN_TO_ID),
+        pen_vocab_size=action_tokenizer.num_pen_states,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_decoder_layers=args.decoder_layers,
