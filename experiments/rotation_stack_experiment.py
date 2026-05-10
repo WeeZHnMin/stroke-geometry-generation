@@ -109,17 +109,25 @@ class RotationStackModel(nn.Module):
         activation: str = "scaled_tanh",
         activation_scale: float = 4.0,
         use_scale: bool = False,
+        shared_params: bool = False,
     ) -> None:
         super().__init__()
+        self.shared_params = bool(shared_params)
         self.layers = nn.ModuleList(
             [
                 RotationBlock(activation=activation, activation_scale=activation_scale, use_scale=use_scale)
-                for _ in range(layers)
+                for _ in range(layers if not self.shared_params else 1)
             ]
         )
+        self.num_steps = int(layers)
 
     def forward(self, xy: torch.Tensor, theta: torch.Tensor, log_scale: torch.Tensor | None = None) -> torch.Tensor:
         h = xy
+        if self.shared_params:
+            layer = self.layers[0]
+            for _ in range(self.num_steps):
+                h = layer(h, theta, log_scale=log_scale)
+            return h
         for layer in self.layers:
             h = layer(h, theta, log_scale=log_scale)
         return h
@@ -160,6 +168,7 @@ def train(args: argparse.Namespace) -> dict:
         activation=args.activation,
         activation_scale=args.activation_scale,
         use_scale=args.use_scale,
+        shared_params=args.shared_params,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -243,6 +252,7 @@ def main() -> None:
     parser.add_argument("--activation", type=str, default="scaled_tanh", choices=["scaled_tanh", "tanh", "gelu", "relu"])
     parser.add_argument("--activation-scale", type=float, default=4.0)
     parser.add_argument("--use-scale", action="store_true", help="Learn per-layer conditional scalar scales from input log_scale.")
+    parser.add_argument("--shared-params", action="store_true", help="Reuse the same rotation block for all layers.")
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=3e-3)
