@@ -96,6 +96,13 @@ def train(args: argparse.Namespace) -> None:
         mae_final = (pred_all - target).abs().mean().item()
     print(f"\n最终  MSE={mse_final:.4e}  MAE={mae_final:.4e}")
 
+    # 保存模型
+    torch.save({
+        "model_state": model.state_dict(),
+        "args": vars(args),
+    }, "matrix_memorize_model.pt")
+    print("模型已保存到 matrix_memorize_model.pt")
+
     # 画 loss 曲线
     plt.figure(figsize=(7, 4))
     plt.plot(losses)
@@ -107,16 +114,78 @@ def train(args: argparse.Namespace) -> None:
     plt.savefig("matrix_memorize_loss.png", dpi=120)
     print("loss 曲线已保存到 matrix_memorize_loss.png")
 
+    evaluate(model, xy, target, n_show=20)
+
+
+def evaluate(model: ConstrainedStack, xy: torch.Tensor, target: torch.Tensor, n_show: int = 200) -> None:
+    model.eval()
+    with torch.no_grad():
+        pred = model(xy)
+
+    # 取前 n_show 个点做可视化
+    t_np = target[:n_show].cpu().numpy()
+    p_np = pred[:n_show].cpu().numpy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # 左图：真实 vs 预测散点叠加
+    ax = axes[0]
+    ax.scatter(t_np[:, 0], t_np[:, 1], s=15, alpha=0.6, label="真实", color="steelblue")
+    ax.scatter(p_np[:, 0], p_np[:, 1], s=15, alpha=0.6, label="预测", color="tomato", marker="x")
+    ax.set_title(f"真实 vs 预测（前 {n_show} 点）")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.legend()
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+
+    # 右图：每个点画一条线连接真实和预测（误差线）
+    ax2 = axes[1]
+    for i in range(n_show):
+        ax2.plot([t_np[i, 0], p_np[i, 0]], [t_np[i, 1], p_np[i, 1]],
+                 color="gray", alpha=0.3, linewidth=0.8)
+    ax2.scatter(t_np[:, 0], t_np[:, 1], s=15, alpha=0.7, label="真实", color="steelblue", zorder=3)
+    ax2.scatter(p_np[:, 0], p_np[:, 1], s=15, alpha=0.7, label="预测", color="tomato", marker="x", zorder=3)
+    ax2.set_title(f"误差连线（前 {n_show} 点）")
+    ax2.set_xlabel("x")
+    ax2.set_ylabel("y")
+    ax2.legend()
+    ax2.set_aspect("equal")
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("matrix_memorize_eval.png", dpi=120)
+    print(f"可视化已保存到 matrix_memorize_eval.png")
+
+    # 整体误差统计
+    mse = ((target.cpu() - pred.cpu()) ** 2).mean().item()
+    mae = (target.cpu() - pred.cpu()).abs().mean().item()
+    print(f"全量  MSE={mse:.4e}  MAE={mae:.4e}")
+
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["train", "eval"], default="train")
     parser.add_argument("--n_samples", type=int, default=20000)
     parser.add_argument("--depth", type=int, default=100)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n_show", type=int, default=20, help="eval 模式下展示多少条对比")
+    parser.add_argument("--ckpt", type=str, default="matrix_memorize_model.pt")
     args = parser.parse_args()
-    train(args)
+
+    if args.mode == "train":
+        train(args)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        ckpt = torch.load(args.ckpt, map_location=device)
+        saved = ckpt["args"]
+        model = ConstrainedStack(depth=saved["depth"]).to(device)
+        model.load_state_dict(ckpt["model_state"])
+        xy, target = generate_data(saved["n_samples"], seed=saved["seed"])
+        xy, target = xy.to(device), target.to(device)
+        evaluate(model, xy, target, n_show=args.n_show)
