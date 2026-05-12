@@ -21,19 +21,39 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # ── 数据生成 ──────────────────────────────────────────────────────────────────
 
-def make_sine(n: int, rng: np.random.Generator) -> np.ndarray:
-    A = rng.uniform(0.5, 2.0)
-    w = rng.uniform(0.5, 3.0)
-    phi = rng.uniform(0, 2 * math.pi)
-    x = np.linspace(0, 4 * math.pi, n)
-    y = A * np.sin(w * x + phi)
-    return np.stack([x, y], axis=-1)
+def make_square(n: int, rng: np.random.Generator) -> np.ndarray:
+    a = rng.uniform(1.0, 3.0)
+    # 每条边分配 n//4 个点，最后一段补齐
+    side = n // 4
+    rem = n - side * 4
+    t = np.linspace(0, 1, side, endpoint=False)
+    s0 = np.stack([t * a,        np.zeros(side)], axis=-1)          # 下边 →
+    s1 = np.stack([np.full(side, a), t * a],      axis=-1)          # 右边 ↑
+    s2 = np.stack([a - t * a,    np.full(side, a)], axis=-1)        # 上边 ←
+    s3 = np.stack([np.zeros(side + rem), a - np.linspace(0, a, side + rem)], axis=-1)  # 左边 ↓
+    return np.concatenate([s0, s1, s2, s3], axis=0)
+
+
+def make_rectangle(n: int, rng: np.random.Generator) -> np.ndarray:
+    w = rng.uniform(1.0, 4.0)
+    h = rng.uniform(0.5, 2.0)
+    perimeter = 2 * (w + h)
+    # 按周长比例分配点数
+    n0 = max(2, int(n * w / perimeter))
+    n1 = max(2, int(n * h / perimeter))
+    n2 = max(2, int(n * w / perimeter))
+    n3 = n - n0 - n1 - n2
+    s0 = np.stack([np.linspace(0, w, n0, endpoint=False), np.zeros(n0)], axis=-1)
+    s1 = np.stack([np.full(n1, w), np.linspace(0, h, n1, endpoint=False)], axis=-1)
+    s2 = np.stack([np.linspace(w, 0, n2, endpoint=False), np.full(n2, h)], axis=-1)
+    s3 = np.stack([np.zeros(n3), np.linspace(h, 0, n3)], axis=-1)
+    return np.concatenate([s0, s1, s2, s3], axis=0)
 
 
 def make_circle(n: int, rng: np.random.Generator) -> np.ndarray:
     r = rng.uniform(1.0, 3.0)
     start = rng.uniform(0, 2 * math.pi)
-    turns = rng.uniform(0.5, 2.0)
+    turns = rng.uniform(0.8, 2.0)
     t = np.linspace(start, start + turns * 2 * math.pi, n)
     x = r * np.cos(t)
     y = r * np.sin(t)
@@ -41,7 +61,7 @@ def make_circle(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def make_spiral(n: int, rng: np.random.Generator) -> np.ndarray:
-    turns = rng.uniform(1.0, 4.0)
+    turns = rng.uniform(1.5, 5.0)
     t = np.linspace(0, turns * 2 * math.pi, n)
     r = t / (turns * 2 * math.pi) * 3.0
     x = r * np.cos(t)
@@ -49,19 +69,7 @@ def make_spiral(n: int, rng: np.random.Generator) -> np.ndarray:
     return np.stack([x, y], axis=-1)
 
 
-def make_bezier(n: int, rng: np.random.Generator) -> np.ndarray:
-    # 随机三次贝塞尔曲线
-    p0 = rng.uniform(-2, 2, 2)
-    p1 = rng.uniform(-2, 2, 2)
-    p2 = rng.uniform(-2, 2, 2)
-    p3 = rng.uniform(-2, 2, 2)
-    t = np.linspace(0, 1, n)[:, None]
-    pts = ((1-t)**3 * p0 + 3*(1-t)**2*t * p1
-           + 3*(1-t)*t**2 * p2 + t**3 * p3)
-    return pts
-
-
-GENERATORS = [make_sine, make_circle, make_spiral, make_bezier]
+GENERATORS = [make_square, make_rectangle, make_circle, make_spiral]
 
 
 def generate_dataset(n_seqs: int, seq_len: int, kernel_size: int, seed: int = 42):
