@@ -96,10 +96,10 @@ def generate_dataset(n_seqs: int, seq_len: int, kernel_size: int, seed: int = 42
             dy = seq[t + 1, 1] - seq[t, 1]
             angle = math.atan2(dy, dx)
             all_inputs.append(window)
-            all_targets.append(angle)
+            all_targets.append([math.sin(angle), math.cos(angle)])
 
     inputs = torch.tensor(np.array(all_inputs), dtype=torch.float32)
-    targets = torch.tensor(np.array(all_targets), dtype=torch.float32)
+    targets = torch.tensor(np.array(all_targets), dtype=torch.float32)  # (N, 2)
     return inputs, targets
 
 
@@ -118,7 +118,7 @@ class ConvAnglePredictor(nn.Module):
             nn.GELU(),
             nn.Linear(64, 32),
             nn.GELU(),
-            nn.Linear(32, 1),
+            nn.Linear(32, 2),                   # 输出 (sin θ, cos θ)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -127,16 +127,15 @@ class ConvAnglePredictor(nn.Module):
         h = h.permute(0, 2, 1)                  # (batch, embed_dim, kernel_size)
         h = F.gelu(self.conv(h))                # (batch, embed_dim, 1)
         h = h.squeeze(-1)                        # (batch, embed_dim)
-        return self.mlp(h).squeeze(-1)           # (batch,)
+        out = self.mlp(h)                        # (batch, 2)
+        # 归一化到单位圆，保证 sin²+cos²=1
+        return F.normalize(out, dim=-1)          # (batch, 2)
 
 
-# ── 角度损失（处理 ±π 环绕） ──────────────────────────────────────────────────
+# ── 损失：(sin,cos) 向量的 MSE，天然无环绕问题 ────────────────────────────────
 
 def angle_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    diff = pred - target
-    # 把差值绕到 (-π, π]
-    diff = (diff + math.pi) % (2 * math.pi) - math.pi
-    return (diff ** 2).mean()
+    return F.mse_loss(pred, target)
 
 
 # ── 训练 ──────────────────────────────────────────────────────────────────────
@@ -190,7 +189,10 @@ def angle_mae(model: ConvAnglePredictor, inputs: torch.Tensor, targets: torch.Te
     model.eval()
     with torch.no_grad():
         pred = model(inputs)
-    diff = (pred - targets + math.pi) % (2 * math.pi) - math.pi
+    # 从 (sin,cos) 还原角度再算误差
+    pred_angle = torch.atan2(pred[:, 0], pred[:, 1])
+    true_angle = torch.atan2(targets[:, 0], targets[:, 1])
+    diff = (pred_angle - true_angle + math.pi) % (2 * math.pi) - math.pi
     return diff.abs().mean().item()
 
 
@@ -213,14 +215,15 @@ def visualize(model: ConvAnglePredictor, inputs: torch.Tensor,
     model.eval()
     with torch.no_grad():
         pred = model(inputs[:n_show])
-    pred_np = pred.cpu().numpy()
-    true_np = targets[:n_show].cpu().numpy()
+    # 从 (sin,cos) 还原角度
+    pred_angle = torch.atan2(pred[:, 0], pred[:, 1]).cpu().numpy()
+    true_angle = torch.atan2(targets[:n_show, 0], targets[:n_show, 1]).cpu().numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     # 左图：预测角度 vs 真实角度散点
     ax = axes[0]
-    ax.scatter(true_np, pred_np, s=8, alpha=0.4, color="steelblue")
+    ax.scatter(true_angle, pred_angle, s=8, alpha=0.4, color="steelblue")
     lim = [-math.pi, math.pi]
     ax.plot(lim, lim, "r--", linewidth=1, label="理想对角线")
     ax.set_xlabel("真实角度 (rad)")
@@ -231,7 +234,7 @@ def visualize(model: ConvAnglePredictor, inputs: torch.Tensor,
 
     # 右图：误差分布直方图（角度差，单位°）
     ax2 = axes[1]
-    diff_deg = np.degrees(((pred_np - true_np + math.pi) % (2 * math.pi) - math.pi))
+    diff_deg = np.degrees(((pred_angle - true_angle + math.pi) % (2 * math.pi) - math.pi))
     ax2.hist(diff_deg, bins=50, color="tomato", alpha=0.7, edgecolor="white")
     ax2.set_xlabel("预测误差 (°)")
     ax2.set_ylabel("频数")
