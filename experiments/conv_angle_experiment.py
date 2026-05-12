@@ -75,25 +75,27 @@ GENERATORS = [make_square, make_rectangle, make_circle, make_spiral]
 def generate_dataset(n_seqs: int, seq_len: int, kernel_size: int, seed: int = 42):
     """
     返回 (inputs, targets)：
-      inputs:  (N_windows, kernel_size, 2)  每个窗口的原始坐标
-      targets: (N_windows,)                  对应的方向角 atan2(dy,dx)
+      inputs:  (N_windows, kernel_size-1, 2)  窗口内的相对偏移量 (dx, dy)
+      targets: (N_windows, 2)                  下一步方向 (sin θ, cos θ)
     """
     rng = np.random.default_rng(seed)
     all_inputs, all_targets = [], []
 
     for _ in range(n_seqs):
         gen = rng.choice(GENERATORS)
-        seq = gen(seq_len, rng)                 # (seq_len, 2)
+        seq = gen(seq_len, rng)                 # (seq_len, 2) 绝对坐标
 
-        # 对序列做简单归一化到 [-1, 1]
-        seq = seq - seq.mean(axis=0)
-        scale = np.abs(seq).max() + 1e-6
-        seq = seq / scale
+        # 转成相对偏移量 (dx, dy)，长度变为 seq_len-1
+        delta = np.diff(seq, axis=0)            # (seq_len-1, 2)
 
-        for t in range(kernel_size - 1, seq_len - 1):
-            window = seq[t - kernel_size + 1: t + 1]   # (kernel_size, 2)
-            dx = seq[t + 1, 0] - seq[t, 0]
-            dy = seq[t + 1, 1] - seq[t, 1]
+        # 对偏移量归一化：除以最大步长，让尺度无关
+        scale = np.abs(delta).max() + 1e-6
+        delta = delta / scale
+
+        for t in range(kernel_size - 1, len(delta) - 1):
+            window = delta[t - kernel_size + 1: t + 1]   # (kernel_size, 2) 过去k步的偏移
+            dx = delta[t + 1, 0]
+            dy = delta[t + 1, 1]
             angle = math.atan2(dy, dx)
             all_inputs.append(window)
             all_targets.append([math.sin(angle), math.cos(angle)])
