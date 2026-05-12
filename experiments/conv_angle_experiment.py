@@ -213,8 +213,9 @@ def plot_loss(losses: list[float], args: argparse.Namespace) -> None:
 
 
 def visualize(model: ConvAnglePredictor, inputs: torch.Tensor,
-              targets: torch.Tensor, args: argparse.Namespace, n_show: int = 300) -> None:
+              targets: torch.Tensor, args: argparse.Namespace, n_show: int = 5000) -> None:
     model.eval()
+    n_show = min(n_show, len(inputs))
     with torch.no_grad():
         pred = model(inputs[:n_show])
     # 从 (sin,cos) 还原角度
