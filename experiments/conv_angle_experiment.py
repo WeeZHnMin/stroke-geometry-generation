@@ -9,6 +9,9 @@ import argparse
 import math
 
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams['font.family'] = ['Microsoft YaHei', 'SimHei', 'sans-serif']
+matplotlib.rcParams['axes.unicode_minus'] = False
 import numpy as np
 import torch
 import torch.nn as nn

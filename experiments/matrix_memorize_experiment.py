@@ -7,6 +7,9 @@ from __future__ import annotations
 import argparse
 
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams['font.family'] = ['Microsoft YaHei', 'SimHei', 'sans-serif']
+matplotlib.rcParams['axes.unicode_minus'] = False
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
