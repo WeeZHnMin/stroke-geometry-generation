@@ -227,11 +227,15 @@ def main() -> None:
     parser.add_argument("--max-seq-len", type=int, default=256)
     parser.add_argument("--min-steps", type=int, default=4)
 
-    # tokenizer
+    # tokenizer — either load a pre-built vocab or build from data
+    parser.add_argument("--vocab", type=str, default=None,
+        help="Path to vocab JSON from export_dxdy_vocab.py. "
+             "If not given, vocab is built by scanning --data on the fly.")
     parser.add_argument("--dx-bins", type=int, default=100)
     parser.add_argument("--dy-bins", type=int, default=100)
     parser.add_argument("--log-scale", type=float, default=10.0,
-        help="Log1p compression factor C (0 = uniform binning)")
+        help="Log1p compression factor C (0 = uniform binning). "
+             "Ignored when --vocab is provided.")
 
     # model
     parser.add_argument("--d-model", type=int, default=256)
@@ -260,20 +264,32 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # dataset (first build compact vocab from training data)
-    base_cfg = DxDyPairTokenizerConfig(
-        dx_bins=args.dx_bins,
-        dy_bins=args.dy_bins,
-        log_scale=args.log_scale,
-    )
-    print("Scanning dataset to build compact vocabulary...", flush=True)
-    full_dataset = DxDyJsonlDataset(
-        args.data,
-        base_cfg=base_cfg,
-        max_seq_len=args.max_seq_len,
-        limit=args.limit,
-        min_steps=args.min_steps,
-    )
-    tok = full_dataset.tokenizer
+    if args.vocab is not None:
+        from .action_tokenizer import CompactDxDyTokenizer
+        tok = CompactDxDyTokenizer.load(args.vocab)
+        print(f"Loaded vocab from {args.vocab}: vocab_size={tok.vocab_size}", flush=True)
+        full_dataset = DxDyJsonlDataset(
+            args.data,
+            tokenizer=tok,
+            max_seq_len=args.max_seq_len,
+            limit=args.limit,
+            min_steps=args.min_steps,
+        )
+    else:
+        base_cfg = DxDyPairTokenizerConfig(
+            dx_bins=args.dx_bins,
+            dy_bins=args.dy_bins,
+            log_scale=args.log_scale,
+        )
+        print("Scanning dataset to build compact vocabulary...", flush=True)
+        full_dataset = DxDyJsonlDataset(
+            args.data,
+            base_cfg=base_cfg,
+            max_seq_len=args.max_seq_len,
+            limit=args.limit,
+            min_steps=args.min_steps,
+        )
+        tok = full_dataset.tokenizer
 
     val_size = max(1, int(len(full_dataset) * args.val_ratio))
     train_size = len(full_dataset) - val_size
