@@ -1,3 +1,4 @@
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -326,3 +327,194 @@ class CompactActionTokenMapper:
 # Public aliases used across the codebase.
 ActionTokenizerConfig = PerDimActionTokenizerConfig
 StrokeActionTokenizer = PerDimActionTokenizer
+
+
+# ---------- Paired (dx, dy) single-token tokenizer ----------
+#
+# Each stroke step → one token:  token_id = dx_bin * dy_bins + dy_bin
+#
+# Token layout:
+#   [0,  dx_bins * dy_bins)   → action tokens
+#   dx_bins * dy_bins          → bos_id
+#   dx_bins * dy_bins + 1      → pad_id
+#   vocab_size = dx_bins * dy_bins + 2
+
+
+@dataclass
+class DxDyPairTokenizerConfig:
+    dx_bins: int = 100
+    dy_bins: int = 100
+    min_val: float = -1.0
+    max_val: float = 1.0
+    log_scale: float = 10.0  # C in log1p transform; 0 = uniform (linear)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class DxDyPairTokenizer:
+    """Single token per (dx, dy) step.  token_id = dx_bin * dy_bins + dy_bin.
+
+    When log_scale > 0 a symmetric log1p transform is applied before uniform
+    binning, giving more resolution near zero where most steps cluster:
+
+        f(v) = sign(v) * log1p(|v| * C) / log1p(C)   (maps [-1,1] -> [-1,1])
+
+    With C=10 the range [-0.05, 0.05] gets ~17 bins instead of 5.
+    """
+
+    def __init__(self, cfg: DxDyPairTokenizerConfig | None = None):
+        self.cfg = cfg or DxDyPairTokenizerConfig()
+        assert self.cfg.dx_bins > 0 and self.cfg.dy_bins > 0
+        assert self.cfg.max_val > self.cfg.min_val
+        self.dx_bins = self.cfg.dx_bins
+        self.dy_bins = self.cfg.dy_bins
+        self.action_vocab_size = self.dx_bins * self.dy_bins
+        self.bos_id = self.action_vocab_size
+        self.pad_id = self.action_vocab_size + 1
+        self.vocab_size = self.action_vocab_size + 2
+        self._log_scale = float(self.cfg.log_scale)
+        self._log_denom = math.log1p(self._log_scale) if self._log_scale > 0 else 1.0
+
+    def _forward(self, v: float) -> float:
+        """Map v ∈ [-1,1] to transformed ∈ [-1,1] with more resolution near 0."""
+        if self._log_scale <= 0:
+            return v
+        v = max(-1.0, min(1.0, v))
+        sign = 1.0 if v >= 0 else -1.0
+        return sign * math.log1p(abs(v) * self._log_scale) / self._log_denom
+
+    def _inverse(self, t: float) -> float:
+        """Inverse of _forward."""
+        if self._log_scale <= 0:
+            return t
+        t = max(-1.0, min(1.0, t))
+        sign = 1.0 if t >= 0 else -1.0
+        return sign * (math.expm1(abs(t) * self._log_denom) / self._log_scale)
+
+    def _to_bin(self, value: float, bins: int) -> int:
+        lo, hi = self.cfg.min_val, self.cfg.max_val
+        v = max(lo, min(hi, float(value)))
+        # normalise to [-1, 1], transform, then map to [0, bins)
+        v_norm = (v - lo) / (hi - lo) * 2.0 - 1.0
+        t = self._forward(v_norm)
+        idx = int((t + 1.0) / 2.0 * bins)
+        return max(0, min(bins - 1, idx))
+
+    def _from_bin(self, idx: int, bins: int) -> float:
+        lo, hi = self.cfg.min_val, self.cfg.max_val
+        t = (idx + 0.5) / bins * 2.0 - 1.0   # bin centre in transformed space
+        v_norm = self._inverse(t)
+        return lo + (v_norm + 1.0) / 2.0 * (hi - lo)
+
+    def encode_step(self, dx: float, dy: float) -> int:
+        return self._to_bin(dx, self.dx_bins) * self.dy_bins + self._to_bin(dy, self.dy_bins)
+
+    def decode_step(self, token_id: int) -> tuple[float, float]:
+        token_id = int(token_id)
+        dx_bin, dy_bin = divmod(token_id, self.dy_bins)
+        return self._from_bin(dx_bin, self.dx_bins), self._from_bin(dy_bin, self.dy_bins)
+
+    def encode_sequence(self, strokes: Iterable[dict]) -> list[int]:
+        return [self.encode_step(float(s["dx"]), float(s["dy"])) for s in strokes]
+
+    def decode_sequence(self, token_ids: Iterable[int] | torch.Tensor) -> list[tuple[float, float]]:
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.detach().cpu().tolist()
+        result = []
+        for t in token_ids:
+            t = int(t)
+            if t == self.pad_id or t == self.bos_id or not (0 <= t < self.action_vocab_size):
+                break
+            result.append(self.decode_step(t))
+        return result
+
+
+# ---------- Compact DxDy tokenizer (vocab built from observed data) ----------
+#
+# Raw token IDs from DxDyPairTokenizer are remapped to a compact range
+# [0, N-1] where N = number of unique (dx_bin, dy_bin) pairs seen in training.
+#
+# Compact token layout:
+#   [0, N)    → action tokens (remapped from raw)
+#   N         → bos_id
+#   N + 1     → pad_id
+#   vocab_size = N + 2
+
+
+class CompactDxDyTokenizer:
+    """
+    Wraps DxDyPairTokenizer and remaps raw token IDs to a compact vocabulary
+    built from observed training data.
+
+    Usage:
+        base = DxDyPairTokenizer(cfg)
+        raw_ids = [base.encode_step(dx, dy) for dx, dy in training_data]
+        tok = CompactDxDyTokenizer.from_raw_ids(base, raw_ids)
+        # then use tok.encode_step / decode_step / vocab_size for the model
+    """
+
+    def __init__(self, base: DxDyPairTokenizer, observed_raw_ids: Iterable[int]):
+        self.base = base
+        unique = sorted({int(r) for r in observed_raw_ids})
+        if not unique:
+            raise ValueError("No observed token IDs provided.")
+        self._raw_to_compact: dict[int, int] = {r: i for i, r in enumerate(unique)}
+        self._compact_to_raw: dict[int, int] = {i: r for i, r in enumerate(unique)}
+        self.action_vocab_size = len(unique)
+        self.bos_id = self.action_vocab_size
+        self.pad_id = self.action_vocab_size + 1
+        self.vocab_size = self.action_vocab_size + 2
+
+    @classmethod
+    def from_raw_ids(
+        cls,
+        base: DxDyPairTokenizer,
+        observed_raw_ids: Iterable[int],
+    ) -> "CompactDxDyTokenizer":
+        return cls(base, observed_raw_ids)
+
+    def encode_step(self, dx: float, dy: float) -> int:
+        raw = self.base.encode_step(dx, dy)
+        try:
+            return self._raw_to_compact[raw]
+        except KeyError:
+            # Nearest observed token by raw-id distance (fallback for OOV)
+            nearest = min(self._raw_to_compact, key=lambda r: abs(r - raw))
+            return self._raw_to_compact[nearest]
+
+    def decode_step(self, compact_id: int) -> tuple[float, float]:
+        raw = self._compact_to_raw[int(compact_id)]
+        return self.base.decode_step(raw)
+
+    def encode_sequence(self, strokes: Iterable[dict]) -> list[int]:
+        return [self.encode_step(float(s["dx"]), float(s["dy"])) for s in strokes]
+
+    def decode_sequence(self, token_ids: Iterable[int] | torch.Tensor) -> list[tuple[float, float]]:
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.detach().cpu().tolist()
+        result = []
+        for t in token_ids:
+            t = int(t)
+            if t in (self.bos_id, self.pad_id) or not (0 <= t < self.action_vocab_size):
+                break
+            result.append(self.decode_step(t))
+        return result
+
+    def save(self, path: "str | Path") -> None:
+        import json
+        from pathlib import Path
+        data = {
+            "base_cfg": self.base.cfg.to_dict(),
+            "compact_to_raw": {str(k): v for k, v in self._compact_to_raw.items()},
+        }
+        Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: "str | Path") -> "CompactDxDyTokenizer":
+        import json
+        from pathlib import Path
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        base = DxDyPairTokenizer(DxDyPairTokenizerConfig(**data["base_cfg"]))
+        raw_ids = [int(v) for v in data["compact_to_raw"].values()]
+        return cls(base, raw_ids)
