@@ -102,9 +102,10 @@ def _inject_adapters(bert: BertModel, adapter_dim: int) -> nn.ModuleList:
 
     def _make_hook(adapter: _Adapter):
         def hook(module, inputs, output):
-            # BertLayer output is a tuple; first element is the hidden state
-            hidden = adapter(output[0])
-            return (hidden,) + output[1:]
+            # Newer transformers may return a bare Tensor instead of a tuple
+            if isinstance(output, tuple):
+                return (adapter(output[0]),) + output[1:]
+            return adapter(output)
         return hook
 
     for layer, adapter in zip(bert.encoder.layer, adapters):
