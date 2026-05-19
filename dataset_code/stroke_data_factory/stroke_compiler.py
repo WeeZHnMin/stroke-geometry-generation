@@ -1,4 +1,3 @@
-import math
 from typing import List, Tuple
 
 from .constants import DRAW, END_ALL, END_SHAPE, MOVE
@@ -12,18 +11,9 @@ def append_move_steps(
     target: Point,
     dense_step: float,
 ) -> Point:
-    """Move the pen-up cursor to target using small dx/dy increments."""
-    dx = target.x - start.x
-    dy = target.y - start.y
-    dist = math.hypot(dx, dy)
-    n = max(1, math.ceil(dist / dense_step))
-    prev = start
-    for i in range(1, n + 1):
-        t = i / n
-        p = Point(start.x + dx * t, start.y + dy * t)
-        steps.append(StrokeStep(dx=p.x - prev.x, dy=p.y - prev.y, pen_state=MOVE))
-        prev = p
-    return prev
+    """Move the pen-up cursor to target as a single large step."""
+    steps.append(StrokeStep(dx=target.x - start.x, dy=target.y - start.y, pen_state=MOVE))
+    return target
 
 
 def shape_to_strokes(
