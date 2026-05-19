@@ -179,8 +179,8 @@ def main() -> None:
 
     # encoder
     parser.add_argument("--bert", type=str, default="models/bert-base-chinese")
-    parser.add_argument("--unfreeze-encoder", action="store_true",
-        help="Allow BERT weights to be updated (default: frozen).")
+    parser.add_argument("--adapter-dim", type=int, default=64,
+        help="Adapter bottleneck size per BERT layer (0 = fully frozen, no adapters).")
 
     # decoder init
     parser.add_argument("--decoder-ckpt", type=str, default=None,
@@ -251,7 +251,7 @@ def main() -> None:
         conv_kernel_size=args.conv_kernel,
         bert_path=args.bert,
         encoder_dim=768,
-        freeze_encoder=not args.unfreeze_encoder,
+        adapter_dim=args.adapter_dim,
     )
     model = SFTModel(cfg).to(device)
 

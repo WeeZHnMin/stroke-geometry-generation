@@ -1,13 +1,17 @@
 """Text-conditioned stroke decoder (SFT phase).
 
 Architecture:
-    BERT encoder  →  encoder_hidden [B, L_text, 768]
-                         ↓  Linear projection to d_model
+    BERT (frozen) → Adapter_i (trainable, per layer) → encoder_hidden [B, L_text, 768]
+                         ↓
     stroke tokens → Embedding → CausalConv → Self-Attn → Cross-Attn → FFN → logits
 
-The decoder blocks mirror DxDyDecoder but each block adds a cross-attention
-sublayer between self-attention and FFN.  Cross-attention weights are randomly
-initialised; all other decoder weights are loaded from the pretrained checkpoint.
+Trainable weights:
+    - Adapter modules injected after each BERT layer  (bottleneck MLP + residual)
+    - Cross-attention sublayers in every decoder block
+    - All decoder weights (embedding, conv, self-attn, FFN, lm_head)
+
+BERT original weights stay frozen; adapters let the encoder adapt to the
+stroke-generation domain without expensive full fine-tuning.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ class SFTConfig:
     # encoder
     bert_path: str = "models/bert-base-chinese"
     encoder_dim: int = 768
-    freeze_encoder: bool = True
+    adapter_dim: int = 64   # bottleneck size per adapter; 0 = no adapters (full freeze)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -61,6 +65,52 @@ class SFTConfig:
             max_seq_len=self.max_seq_len,
             conv_kernel_size=self.conv_kernel_size,
         )
+
+
+# ---------------------------------------------------------------------------
+# Adapter module (injected after each BERT layer via forward hook)
+# ---------------------------------------------------------------------------
+
+class _Adapter(nn.Module):
+    """Bottleneck adapter: LayerNorm → down → GELU → up → residual."""
+
+    def __init__(self, d_model: int, bottleneck: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.down = nn.Linear(d_model, bottleneck)
+        self.act  = nn.GELU()
+        self.up   = nn.Linear(bottleneck, d_model)
+        # initialise up-projection near zero so adapter starts as identity
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.up(self.act(self.down(self.norm(x))))
+
+
+def _inject_adapters(bert: BertModel, adapter_dim: int) -> nn.ModuleList:
+    """Freeze BERT weights and register per-layer adapter hooks.
+
+    Returns the ModuleList of adapters so they are tracked by the parent module.
+    """
+    for p in bert.parameters():
+        p.requires_grad = False
+
+    d_model = bert.config.hidden_size
+    n_layers = bert.config.num_hidden_layers
+    adapters = nn.ModuleList([_Adapter(d_model, adapter_dim) for _ in range(n_layers)])
+
+    def _make_hook(adapter: _Adapter):
+        def hook(module, inputs, output):
+            # BertLayer output is a tuple; first element is the hidden state
+            hidden = adapter(output[0])
+            return (hidden,) + output[1:]
+        return hook
+
+    for layer, adapter in zip(bert.encoder.layer, adapters):
+        layer.register_forward_hook(_make_hook(adapter))
+
+    return adapters
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +207,14 @@ class SFTModel(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        # encoder
+        # encoder: BERT always frozen; adapters are trainable if adapter_dim > 0
         self.encoder = BertModel.from_pretrained(cfg.bert_path)
-        if cfg.freeze_encoder:
+        if cfg.adapter_dim > 0:
+            self.encoder_adapters = _inject_adapters(self.encoder, cfg.adapter_dim)
+        else:
             for p in self.encoder.parameters():
                 p.requires_grad = False
+            self.encoder_adapters = nn.ModuleList()
 
         # decoder
         self.token_emb = nn.Embedding(cfg.vocab_size, cfg.d_model,
@@ -180,8 +233,7 @@ class SFTModel(nn.Module):
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (encoder_hidden [B,L,768], encoder_pad_mask [B,L])."""
-        with torch.set_grad_enabled(not self.cfg.freeze_encoder):
-            out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
         hidden = out.last_hidden_state                         # [B, L, 768]
         pad_mask = attention_mask == 0                         # True where padding
         return hidden, pad_mask
