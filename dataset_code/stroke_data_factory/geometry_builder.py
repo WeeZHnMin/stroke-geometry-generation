@@ -92,7 +92,7 @@ def build_contrast_pair_geometry(scene_spec: Dict[str, object], rng: random.Rand
     family = scene_spec["contrast_family"]
     family_map = {
         "rectangle": ["rectangle", "wide_rectangle", "tall_rectangle", "rotated_rectangle"],
-        "triangle": ["triangle", "equilateral_triangle", "isosceles_triangle", "right_triangle"],
+        "triangle": ["triangle", "equilateral_triangle", "isosceles_triangle", "right_triangle", "acute_triangle", "obtuse_triangle"],
         "square": ["square", "rotated_square"],
         "ellipse": ["circle", "ellipse", "wide_ellipse", "tall_ellipse"],
     }
@@ -267,7 +267,7 @@ def build_relative_size_pair_geometry(scene_spec: Dict[str, object], rng: random
         "circle": ["circle", "wide_ellipse", "tall_ellipse"],
         "ellipse": ["ellipse", "wide_ellipse", "tall_ellipse"],
         "rectangle": ["rectangle", "wide_rectangle", "tall_rectangle", "rotated_rectangle"],
-        "triangle": ["triangle", "equilateral_triangle", "isosceles_triangle", "right_triangle"],
+        "triangle": ["triangle", "equilateral_triangle", "isosceles_triangle", "right_triangle", "acute_triangle", "obtuse_triangle"],
         "square": ["square", "rotated_square"],
     }
     shapes = [build_shape_from_type(rng.choice(family_map[family]), rng), build_shape_from_type(rng.choice(family_map[family]), rng)]
@@ -782,6 +782,51 @@ def sample_right_triangle(rng: random.Random) -> ShapeSample:
     return ShapeSample("right_triangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
+def sample_acute_triangle(rng: random.Random) -> ShapeSample:
+    """All three angles < 90°: ensures apex height > half base width."""
+    w = rng.uniform(0.18, 0.30)
+    h = rng.uniform(w * 0.6, w * 1.2)   # h > w/2 guarantees acute apex angle
+    cx = rng.uniform(0.25, 0.75)
+    cy = rng.uniform(0.25, 0.75)
+    offset = rng.uniform(-w * 0.15, w * 0.15)
+    pts = [
+        Point(cx - w / 2, cy + h / 2),
+        Point(cx + w / 2, cy + h / 2),
+        Point(cx + offset, cy - h / 2),
+    ]
+    angle = rng.uniform(-math.pi / 4, math.pi / 4)
+    pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
+    pts = [Point(clamp(p.x), clamp(p.y)) for p in pts]
+    prompt = f"a {describe_size(max(w, h))} acute triangle {describe_position(cx, cy)}"
+    return ShapeSample("acute_triangle", pts, prompt, polygon_bbox(pts), closed=True)
+
+
+def sample_obtuse_triangle(rng: random.Random) -> ShapeSample:
+    """One angle > 90°: either flat (obtuse apex) or offset apex (obtuse base angle)."""
+    cx = rng.uniform(0.25, 0.75)
+    cy = rng.uniform(0.25, 0.75)
+    method = rng.choice(["flat", "offset"])
+    if method == "flat":
+        w = rng.uniform(0.22, 0.34)
+        h = rng.uniform(w * 0.15, w * 0.38)   # h < w/2: apex angle obtuse
+        offset = rng.uniform(-w * 0.1, w * 0.1)
+    else:
+        w = rng.uniform(0.18, 0.28)
+        h = rng.uniform(w * 0.4, w * 0.9)
+        # |offset| > w/2 puts apex past a base vertex → that base angle becomes obtuse
+        offset = rng.uniform(w * 0.55, w * 0.80) * rng.choice([-1, 1])
+    pts = [
+        Point(cx - w / 2, cy + h / 2),
+        Point(cx + w / 2, cy + h / 2),
+        Point(cx + offset, cy - h / 2),
+    ]
+    angle = rng.uniform(-math.pi / 4, math.pi / 4)
+    pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
+    pts = [Point(clamp(p.x), clamp(p.y)) for p in pts]
+    prompt = f"a {describe_size(max(w, h))} obtuse triangle {describe_position(cx, cy)}"
+    return ShapeSample("obtuse_triangle", pts, prompt, polygon_bbox(pts), closed=True)
+
+
 def sample_circle(rng: random.Random) -> ShapeSample:
     r = rng.uniform(0.08, 0.18)
     cx = rng.uniform(r + 0.05, 1 - r - 0.05)
@@ -1148,6 +1193,10 @@ def build_shape_from_type(shape_type: str, rng: random.Random) -> ShapeSample:
         shape = sample_isosceles_triangle(rng)
     elif shape_type == "right_triangle":
         shape = sample_right_triangle(rng)
+    elif shape_type == "acute_triangle":
+        shape = sample_acute_triangle(rng)
+    elif shape_type == "obtuse_triangle":
+        shape = sample_obtuse_triangle(rng)
     elif shape_type == "regular_polygon":
         shape = sample_regular_polygon(rng)
     elif shape_type == "pentagon":

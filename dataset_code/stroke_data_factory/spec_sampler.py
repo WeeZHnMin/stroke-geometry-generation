@@ -422,6 +422,7 @@ def sample_scene_spec(
         num_shapes = 1
         allowed_shapes = [
             "line", "polyline", "triangle", "equilateral_triangle", "isosceles_triangle", "right_triangle",
+            "acute_triangle", "obtuse_triangle",
             "square", "rotated_square", "rectangle", "wide_rectangle",
             "tall_rectangle", "rotated_rectangle", "open_rectangle", "regular_polygon",
             "pentagon", "hexagon", "octagon", "irregular_quad", "trapezoid", "rhombus", "parallelogram", "kite",
@@ -435,6 +436,7 @@ def sample_scene_spec(
         num_shapes = 2
         allowed_shapes = [
             "line", "polyline", "triangle", "equilateral_triangle", "isosceles_triangle", "right_triangle",
+            "acute_triangle", "obtuse_triangle",
             "square", "rotated_square", "rectangle", "wide_rectangle",
             "tall_rectangle", "rotated_rectangle", "open_rectangle", "regular_polygon",
             "pentagon", "hexagon", "octagon", "irregular_quad", "trapezoid", "rhombus", "parallelogram", "kite",
@@ -468,6 +470,7 @@ def sample_scene_spec(
             allowed_shapes = [
                 "line", "polyline",
                 "triangle", "equilateral_triangle", "isosceles_triangle", "right_triangle",
+                "acute_triangle", "obtuse_triangle",
                 "square", "rotated_square", "rectangle", "wide_rectangle", "tall_rectangle", "rotated_rectangle",
                 "circle", "ellipse", "wide_ellipse", "tall_ellipse",
                 "arc", "regular_polygon", "pentagon", "hexagon", "octagon",
