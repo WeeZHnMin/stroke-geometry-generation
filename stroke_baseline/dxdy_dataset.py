@@ -76,27 +76,40 @@ class DxDyJsonlDataset(Dataset):
             tokenizer = CompactDxDyTokenizer.from_raw_ids(base, observed)
 
         self.tokenizer = tokenizer
-        self.samples: list[torch.Tensor] = []
+        self.samples: list[tuple[torch.Tensor, torch.Tensor]] = []
         for steps in raw_samples:
             ids = [tokenizer.encode_step(dx, dy) for dx, dy in steps]
-            self.samples.append(torch.tensor(ids, dtype=torch.long))
+            # cumulative (x, y): BOS at (0,0), then accumulate decoded dx/dy
+            cx, cy = 0.0, 0.0
+            xy = [(0.0, 0.0)]   # position for BOS token
+            for dx, dy in steps:
+                cx += dx
+                cy += dy
+                xy.append((cx, cy))
+            self.samples.append((
+                torch.tensor(ids, dtype=torch.long),
+                torch.tensor(xy, dtype=torch.float32),  # [N+1, 2]
+            ))
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        ids = self.samples[idx]
+        ids, xy = self.samples[idx]
         tok = self.tokenizer
         bos = tok.bos_id
         pad = tok.pad_id
 
         # truncate to max_seq_len action tokens (before adding BOS)
         ids = ids[: self.max_seq_len]
+        xy = xy[: self.max_seq_len + 1]   # xy already includes BOS position at [0]
 
-        # input:  [BOS, t0, t1, ..., t_{N-1}]         length = N+1
-        # target: [t0,  t1, ..., t_{N-1}, -100]       -100 at the end (no next token)
+        # input:  [BOS, t0, t1, ..., t_{N-1}]
+        # target: [t0,  t1, ..., t_{N-1}, -100]
+        # coords: [xy_bos, xy_0, xy_1, ..., xy_{N-1}]  (aligns with input_ids)
         input_ids = torch.cat([torch.tensor([bos], dtype=torch.long), ids])
         target_ids = torch.cat([ids, torch.tensor([-100], dtype=torch.long)])
+        coords = xy  # [N+1, 2]
 
         # pad to max_seq_len + 1
         total = self.max_seq_len + 1
@@ -104,12 +117,14 @@ class DxDyJsonlDataset(Dataset):
         if pad_len > 0:
             input_ids = torch.cat([input_ids, torch.full((pad_len,), pad, dtype=torch.long)])
             target_ids = torch.cat([target_ids, torch.full((pad_len,), -100, dtype=torch.long)])
+            coords = torch.cat([coords, torch.zeros(pad_len, 2)])
 
-        return {"input_ids": input_ids, "target_ids": target_ids}
+        return {"input_ids": input_ids, "target_ids": target_ids, "coords": coords}
 
 
 def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
     return {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "target_ids": torch.stack([b["target_ids"] for b in batch]),
+        "coords": torch.stack([b["coords"] for b in batch]),
     }

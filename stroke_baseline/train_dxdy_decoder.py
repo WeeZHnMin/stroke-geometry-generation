@@ -132,7 +132,7 @@ def train_epoch(
         set_lr(optimizer, lr)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = model(batch["input_ids"])
+        logits = model(batch["input_ids"], coords=batch.get("coords"))
         loss, metrics = compute_loss(
             logits, batch["target_ids"],
             sigma=args.label_sigma, window=args.label_window,
@@ -173,7 +173,7 @@ def evaluate(
     counts: dict[str, int] = {}
     for batch in loader:
         batch = move_batch(batch, device)
-        logits = model(batch["input_ids"])
+        logits = model(batch["input_ids"], coords=batch.get("coords"))
         _, metrics = compute_loss(
             logits, batch["target_ids"],
             sigma=args.label_sigma, window=args.label_window,
