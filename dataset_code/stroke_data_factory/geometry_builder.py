@@ -9,21 +9,26 @@ from .utils import bbox_center, clamp, polygon_bbox, rotate_point, scale_shape, 
 def describe_position(cx: float, cy: float) -> str:
     horiz = "left" if cx < 0.38 else "right" if cx > 0.62 else "center"
     vert = "top" if cy < 0.38 else "bottom" if cy > 0.62 else "middle"
-    if horiz == "center" and vert == "middle":
-        return "near the center"
-    if horiz == "center":
-        return f"near the {vert}"
-    if vert == "middle":
-        return f"on the {horiz}"
-    return f"in the {vert} {horiz}"
+    _pos_map = {
+        ("center", "middle"): "位于中心",
+        ("center", "top"):    "位于上方",
+        ("center", "bottom"): "位于下方",
+        ("left",   "middle"): "位于左侧",
+        ("right",  "middle"): "位于右侧",
+        ("left",   "top"):    "位于左上角",
+        ("right",  "top"):    "位于右上角",
+        ("left",   "bottom"): "位于左下角",
+        ("right",  "bottom"): "位于右下角",
+    }
+    return _pos_map.get((horiz, vert), "位于中心")
 
 
 def describe_size(scale: float) -> str:
     if scale < 0.18:
-        return "small"
+        return "小"
     if scale < 0.3:
-        return "medium"
-    return "large"
+        return "中等"
+    return "大"
 
 
 def _sanitize_shape(shape: ShapeSample) -> ShapeSample:
@@ -537,7 +542,7 @@ def _rectangle_shape(w: float, h: float, cx: float, cy: float, angle: float, sha
         corners = [rotate_point(p.x, p.y, cx, cy, angle) for p in corners]
     pos = describe_position(cx, cy)
     size = describe_size(max(w, h))
-    prompt = f"a {size} {prompt_name} {pos}"
+    prompt = f"一个{size}{prompt_name}，{pos}"
     return ShapeSample(shape_type, corners, prompt, polygon_bbox(corners), closed=True)
 
 
@@ -552,7 +557,7 @@ def sample_line(rng: random.Random) -> ShapeSample:
 
     cx = (x0 + x1) / 2
     cy = (y0 + y1) / 2
-    prompt = f"a {describe_size(length)} line segment {describe_position(cx, cy)}"
+    prompt = f"一条{describe_size(length)}线段，{describe_position(cx, cy)}"
     return ShapeSample("line", points, prompt, polygon_bbox(points), closed=False)
 
 
@@ -574,7 +579,7 @@ def sample_polyline(rng: random.Random) -> ShapeSample:
     cx = (bbox["x_min"] + bbox["x_max"]) / 2
     cy = (bbox["y_min"] + bbox["y_max"]) / 2
     span = max(bbox["x_max"] - bbox["x_min"], bbox["y_max"] - bbox["y_min"])
-    prompt = f"a {describe_size(span)} polyline {describe_position(cx, cy)}"
+    prompt = f"一条{describe_size(span)}折线，{describe_position(cx, cy)}"
     return ShapeSample("polyline", points, prompt, bbox, closed=False)
 
 
@@ -595,7 +600,7 @@ def sample_irregular_quad(rng: random.Random) -> ShapeSample:
 
     bbox = polygon_bbox(points)
     span = max(bbox["x_max"] - bbox["x_min"], bbox["y_max"] - bbox["y_min"])
-    prompt = f"an {describe_size(span)} irregular quadrilateral {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(span)}不规则四边形，{describe_position(cx, cy)}"
     return ShapeSample("irregular_quad", points, prompt, bbox, closed=True)
 
 
@@ -613,7 +618,7 @@ def sample_trapezoid(rng: random.Random) -> ShapeSample:
     ]
     angle = rng.uniform(-math.pi / 6, math.pi / 6)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
-    prompt = f"a {describe_size(max(bottom_w, h))} trapezoid {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(bottom_w, h))}梯形，{describe_position(cx, cy)}"
     return ShapeSample("trapezoid", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -630,7 +635,7 @@ def sample_rhombus(rng: random.Random) -> ShapeSample:
     ]
     angle = rng.uniform(-math.pi / 4, math.pi / 4)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
-    prompt = f"a {describe_size(max(diag_w, diag_h))} rhombus {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(diag_w, diag_h))}菱形，{describe_position(cx, cy)}"
     return ShapeSample("rhombus", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -648,7 +653,7 @@ def sample_parallelogram(rng: random.Random) -> ShapeSample:
     ]
     angle = rng.uniform(-math.pi / 6, math.pi / 6)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
-    prompt = f"a {describe_size(max(w, h))} parallelogram {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(w, h))}平行四边形，{describe_position(cx, cy)}"
     return ShapeSample("parallelogram", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -666,7 +671,7 @@ def sample_kite(rng: random.Random) -> ShapeSample:
     ]
     angle = rng.uniform(-math.pi / 4, math.pi / 4)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
-    prompt = f"a {describe_size(max(top + bottom, side_w * 2))} kite shape {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(top + bottom, side_w * 2))}筝形，{describe_position(cx, cy)}"
     return ShapeSample("kite", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -674,7 +679,7 @@ def sample_square(rng: random.Random) -> ShapeSample:
     side = rng.uniform(0.14, 0.28)
     cx = rng.uniform(side / 2 + 0.06, 1 - side / 2 - 0.06)
     cy = rng.uniform(side / 2 + 0.06, 1 - side / 2 - 0.06)
-    return _rectangle_shape(side, side, cx, cy, 0.0, "square", "square")
+    return _rectangle_shape(side, side, cx, cy, 0.0, "square", "正方形")
 
 
 def sample_rotated_square(rng: random.Random) -> ShapeSample:
@@ -682,7 +687,7 @@ def sample_rotated_square(rng: random.Random) -> ShapeSample:
     cx = rng.uniform(side / 2 + 0.10, 1 - side / 2 - 0.10)
     cy = rng.uniform(side / 2 + 0.10, 1 - side / 2 - 0.10)
     angle = rng.uniform(math.pi / 8, math.pi / 3)
-    return _rectangle_shape(side, side, cx, cy, angle, "rotated_square", "rotated square")
+    return _rectangle_shape(side, side, cx, cy, angle, "rotated_square", "旋转正方形")
 
 
 def sample_rectangle(rng: random.Random) -> ShapeSample:
@@ -691,7 +696,7 @@ def sample_rectangle(rng: random.Random) -> ShapeSample:
     cx = rng.uniform(w / 2 + 0.05, 1 - w / 2 - 0.05)
     cy = rng.uniform(h / 2 + 0.05, 1 - h / 2 - 0.05)
     angle = rng.choice([0.0, 0.0, 0.0, math.pi / 12, -math.pi / 12])
-    return _rectangle_shape(w, h, cx, cy, angle, "rectangle", "rectangle")
+    return _rectangle_shape(w, h, cx, cy, angle, "rectangle", "矩形")
 
 
 def sample_wide_rectangle(rng: random.Random) -> ShapeSample:
@@ -699,7 +704,7 @@ def sample_wide_rectangle(rng: random.Random) -> ShapeSample:
     h = rng.uniform(0.10, 0.16)
     cx = rng.uniform(w / 2 + 0.06, 1 - w / 2 - 0.06)
     cy = rng.uniform(h / 2 + 0.06, 1 - h / 2 - 0.06)
-    return _rectangle_shape(w, h, cx, cy, 0.0, "wide_rectangle", "wide rectangle")
+    return _rectangle_shape(w, h, cx, cy, 0.0, "wide_rectangle", "宽矩形")
 
 
 def sample_tall_rectangle(rng: random.Random) -> ShapeSample:
@@ -707,7 +712,7 @@ def sample_tall_rectangle(rng: random.Random) -> ShapeSample:
     h = rng.uniform(0.24, 0.38)
     cx = rng.uniform(w / 2 + 0.06, 1 - w / 2 - 0.06)
     cy = rng.uniform(h / 2 + 0.06, 1 - h / 2 - 0.06)
-    return _rectangle_shape(w, h, cx, cy, 0.0, "tall_rectangle", "tall rectangle")
+    return _rectangle_shape(w, h, cx, cy, 0.0, "tall_rectangle", "高矩形")
 
 
 def sample_rotated_rectangle(rng: random.Random) -> ShapeSample:
@@ -716,7 +721,7 @@ def sample_rotated_rectangle(rng: random.Random) -> ShapeSample:
     cx = rng.uniform(w / 2 + 0.12, 1 - w / 2 - 0.12)
     cy = rng.uniform(h / 2 + 0.12, 1 - h / 2 - 0.12)
     angle = rng.choice([math.pi / 6, -math.pi / 6, math.pi / 4, -math.pi / 4])
-    return _rectangle_shape(w, h, cx, cy, angle, "rotated_rectangle", "rotated rectangle")
+    return _rectangle_shape(w, h, cx, cy, angle, "rotated_rectangle", "旋转矩形")
 
 
 def sample_triangle(rng: random.Random) -> ShapeSample:
@@ -732,7 +737,7 @@ def sample_triangle(rng: random.Random) -> ShapeSample:
 
     pos = describe_position(cx, cy)
     size = describe_size(radius * 2)
-    prompt = f"a {size} triangle {pos}"
+    prompt = f"一个{size}三角形，{pos}"
     return ShapeSample("triangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -746,7 +751,7 @@ def sample_equilateral_triangle(rng: random.Random) -> ShapeSample:
     for i in range(3):
         t = phase + i * 2 * math.pi / 3
         pts.append(Point(clamp(cx + radius * math.cos(t)), clamp(cy + radius * math.sin(t))))
-    prompt = f"a {describe_size(side)} equilateral triangle {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(side)}等边三角形，{describe_position(cx, cy)}"
     return ShapeSample("equilateral_triangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -762,7 +767,7 @@ def sample_isosceles_triangle(rng: random.Random) -> ShapeSample:
     ]
     angle = rng.uniform(-math.pi / 4, math.pi / 4)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
-    prompt = f"an {describe_size(max(w, h))} isosceles triangle {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(w, h))}等腰三角形，{describe_position(cx, cy)}"
     return ShapeSample("isosceles_triangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -778,7 +783,7 @@ def sample_right_triangle(rng: random.Random) -> ShapeSample:
     ]
     angle = rng.uniform(-math.pi / 3, math.pi / 3)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
-    prompt = f"a {describe_size(max(w, h))} right triangle {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(w, h))}直角三角形，{describe_position(cx, cy)}"
     return ShapeSample("right_triangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -797,7 +802,7 @@ def sample_acute_triangle(rng: random.Random) -> ShapeSample:
     angle = rng.uniform(-math.pi / 4, math.pi / 4)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
     pts = [Point(clamp(p.x), clamp(p.y)) for p in pts]
-    prompt = f"a {describe_size(max(w, h))} acute triangle {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(w, h))}锐角三角形，{describe_position(cx, cy)}"
     return ShapeSample("acute_triangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -823,7 +828,7 @@ def sample_obtuse_triangle(rng: random.Random) -> ShapeSample:
     angle = rng.uniform(-math.pi / 4, math.pi / 4)
     pts = [rotate_point(p.x, p.y, cx, cy, angle) for p in pts]
     pts = [Point(clamp(p.x), clamp(p.y)) for p in pts]
-    prompt = f"a {describe_size(max(w, h))} obtuse triangle {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(w, h))}钝角三角形，{describe_position(cx, cy)}"
     return ShapeSample("obtuse_triangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -840,7 +845,7 @@ def sample_circle(rng: random.Random) -> ShapeSample:
 
     pos = describe_position(cx, cy)
     size = describe_size(r * 2)
-    prompt = f"a {size} circle {pos}"
+    prompt = f"一个{size}圆形，{pos}"
     return ShapeSample("circle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -861,7 +866,7 @@ def sample_ellipse(rng: random.Random) -> ShapeSample:
 
     pos = describe_position(cx, cy)
     size = describe_size(max(rx, ry) * 2)
-    prompt = f"a {size} ellipse {pos}"
+    prompt = f"一个{size}椭圆，{pos}"
     return ShapeSample("ellipse", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -878,7 +883,7 @@ def sample_wide_ellipse(rng: random.Random) -> ShapeSample:
         x = cx + rx * math.cos(t)
         y = cy + ry * math.sin(t)
         pts.append(rotate_point(x, y, cx, cy, angle))
-    prompt = f"a {describe_size(rx * 2)} wide ellipse {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(rx * 2)}宽椭圆，{describe_position(cx, cy)}"
     return ShapeSample("wide_ellipse", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -895,7 +900,7 @@ def sample_tall_ellipse(rng: random.Random) -> ShapeSample:
         x = cx + rx * math.cos(t)
         y = cy + ry * math.sin(t)
         pts.append(rotate_point(x, y, cx, cy, angle))
-    prompt = f"a {describe_size(ry * 2)} tall ellipse {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(ry * 2)}高椭圆，{describe_position(cx, cy)}"
     return ShapeSample("tall_ellipse", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -913,7 +918,7 @@ def sample_arc(rng: random.Random) -> ShapeSample:
         pts.append(Point(cx + r * math.cos(t), cy + r * math.sin(t)))
 
     pos = describe_position(cx, cy)
-    prompt = f"a {describe_size(r * 2)} arc {pos}"
+    prompt = f"一段{describe_size(r * 2)}弧线，{pos}"
     return ShapeSample("arc", pts, prompt, polygon_bbox(pts), closed=False)
 
 
@@ -932,7 +937,7 @@ def sample_notched_rectangle(rng: random.Random) -> ShapeSample:
         Point(x0 + w - notch_w, y0 + h - notch_h),
         Point(x0, y0 + h - notch_h),
     ]
-    prompt = "a notched rectangle"
+    prompt = "一个带缺口的矩形"
     return ShapeSample("notched_rectangle", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -952,7 +957,7 @@ def sample_u_shape(rng: random.Random) -> ShapeSample:
         Point(x0 + thickness, y0 + h),
         Point(x0, y0 + h),
     ]
-    prompt = "a U-shaped outline"
+    prompt = "一个U形轮廓"
     return ShapeSample("u_shape", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -972,7 +977,7 @@ def sample_c_shape(rng: random.Random) -> ShapeSample:
         Point(x0 + thickness, y0 + thickness),
         Point(x0 + w, y0 + thickness),
     ]
-    prompt = "a C-shaped outline"
+    prompt = "一个C形轮廓"
     return ShapeSample("c_shape", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -995,8 +1000,8 @@ def sample_linear_function(rng: random.Random) -> ShapeSample:
     slope = rng.uniform(-1.5, 1.5)
     intercept = rng.uniform(-0.4, 0.4)
     points = _sample_function_points(lambda x: slope * x + intercept, -1.0, 1.0, rng.randint(14, 22))
-    descriptor = "rising" if slope > 0.2 else "falling" if slope < -0.2 else "flat"
-    prompt = f"a {descriptor} linear function graph"
+    descriptor = "上升" if slope > 0.2 else "下降" if slope < -0.2 else "水平"
+    prompt = f"一条{descriptor}的线性函数图像"
     return ShapeSample("linear_function", points, prompt, polygon_bbox(points), closed=False)
 
 
@@ -1005,8 +1010,8 @@ def sample_parabola(rng: random.Random) -> ShapeSample:
     h = rng.uniform(-0.4, 0.4)
     k = rng.uniform(-0.4, 0.2)
     points = _sample_function_points(lambda x: a * (x - h) ** 2 + k, -1.0, 1.0, rng.randint(18, 28))
-    opening = "upward" if a > 0 else "downward"
-    prompt = f"a parabola opening {opening}"
+    opening = "向上" if a > 0 else "向下"
+    prompt = f"一条开口{opening}的抛物线"
     return ShapeSample("parabola", points, prompt, polygon_bbox(points), closed=False)
 
 
@@ -1015,8 +1020,8 @@ def sample_sine_wave(rng: random.Random) -> ShapeSample:
     freq = rng.uniform(0.8, 2.2)
     phase = rng.uniform(0, math.pi)
     points = _sample_function_points(lambda x: amp * math.sin(freq * math.pi * x + phase), -1.0, 1.0, rng.randint(24, 36))
-    descriptor = "low-frequency" if freq < 1.3 else "high-frequency"
-    prompt = f"a {descriptor} sine wave"
+    descriptor = "低频" if freq < 1.3 else "高频"
+    prompt = f"一条{descriptor}正弦波"
     return ShapeSample("sine_wave", points, prompt, polygon_bbox(points), closed=False)
 
 
@@ -1025,8 +1030,8 @@ def sample_cosine_wave(rng: random.Random) -> ShapeSample:
     freq = rng.uniform(0.8, 2.2)
     phase = rng.uniform(0, math.pi)
     points = _sample_function_points(lambda x: amp * math.cos(freq * math.pi * x + phase), -1.0, 1.0, rng.randint(24, 36))
-    descriptor = "low-frequency" if freq < 1.3 else "high-frequency"
-    prompt = f"a {descriptor} cosine wave"
+    descriptor = "低频" if freq < 1.3 else "高频"
+    prompt = f"一条{descriptor}余弦波"
     return ShapeSample("cosine_wave", points, prompt, polygon_bbox(points), closed=False)
 
 
@@ -1036,7 +1041,7 @@ def sample_cubic_function(rng: random.Random) -> ShapeSample:
     c = rng.uniform(-0.6, 0.6)
     d = rng.uniform(-0.3, 0.3)
     points = _sample_function_points(lambda x: a * x**3 + b * x**2 + c * x + d, -1.0, 1.0, rng.randint(18, 30))
-    prompt = "a cubic function graph"
+    prompt = "一条三次函数图像"
     return ShapeSample("cubic_function", points, prompt, polygon_bbox(points), closed=False)
 
 
@@ -1045,7 +1050,7 @@ def sample_absolute_value_function(rng: random.Random) -> ShapeSample:
     shift_x = rng.uniform(-0.4, 0.4)
     shift_y = rng.uniform(-0.3, 0.2)
     points = _sample_function_points(lambda x: scale * abs(x - shift_x) + shift_y, -1.0, 1.0, rng.randint(14, 22))
-    prompt = "an absolute value function"
+    prompt = "一条绝对值函数图像"
     return ShapeSample("absolute_value_function", points, prompt, polygon_bbox(points), closed=False)
 
 
@@ -1060,7 +1065,7 @@ def sample_regular_polygon(rng: random.Random) -> ShapeSample:
         t = phase + 2 * math.pi * i / n_sides
         pts.append(Point(cx + r * math.cos(t), cy + r * math.sin(t)))
 
-    prompt = f"a {describe_size(r * 2)} regular polygon {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(r * 2)}正多边形，{describe_position(cx, cy)}"
     return ShapeSample("regular_polygon", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -1085,7 +1090,8 @@ def _sample_named_regular_polygon(rng: random.Random, n_sides: int, name: str) -
     for i in range(n_sides):
         t = phase + 2 * math.pi * i / n_sides
         pts.append(Point(cx + r * math.cos(t), cy + r * math.sin(t)))
-    prompt = f"a {describe_size(r * 2)} {name} {describe_position(cx, cy)}"
+    _name_zh = {"pentagon": "五边形", "hexagon": "六边形", "octagon": "八边形"}
+    prompt = f"一个{describe_size(r * 2)}{_name_zh.get(name, name)}，{describe_position(cx, cy)}"
     return ShapeSample(name, pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -1103,7 +1109,7 @@ def sample_open_rectangle(rng: random.Random) -> ShapeSample:
     start_idx = rng.randint(0, 3)
     ordered = corners[start_idx:] + corners[:start_idx]
     ordered = ordered[:3]
-    prompt = f"an open {describe_size(max(w, h))} rectangle {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(max(w, h))}开口矩形，{describe_position(cx, cy)}"
     return ShapeSample("open_rectangle", ordered, prompt, polygon_bbox(corners), closed=False)
 
 
@@ -1119,7 +1125,7 @@ def sample_star(rng: random.Random) -> ShapeSample:
         t = phase + math.pi * i / 5
         pts.append(Point(cx + r * math.cos(t), cy + r * math.sin(t)))
 
-    prompt = f"a {describe_size(outer * 2)} star shape {describe_position(cx, cy)}"
+    prompt = f"一个{describe_size(outer * 2)}星形，{describe_position(cx, cy)}"
     return ShapeSample("star", pts, prompt, polygon_bbox(pts), closed=True)
 
 
@@ -1141,7 +1147,7 @@ def sample_room(rng: random.Random) -> ShapeSample:
             Point(x0 + w - notch_w, y0 + h),
             Point(x0, y0 + h),
         ]
-        desc = "an L-shaped room with a top-right notch"
+        desc = "一个右上角有缺口的L形房间"
     else:
         pts = [
             Point(x0 + notch_w, y0),
@@ -1151,7 +1157,7 @@ def sample_room(rng: random.Random) -> ShapeSample:
             Point(x0, y0 + notch_h),
             Point(x0 + notch_w, y0 + notch_h),
         ]
-        desc = "an L-shaped room with a bottom-left notch"
+        desc = "一个左下角有缺口的L形房间"
 
     return ShapeSample("room", pts, desc, polygon_bbox(pts), closed=True)
 
