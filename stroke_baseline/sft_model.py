@@ -277,7 +277,7 @@ class SFTModel(nn.Module):
         Cross-attention weights (_SFTDecoderBlock.norm_cross / cross_*) are
         intentionally skipped — they are randomly initialised as new weights.
         """
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         pretrained = ckpt["model"]
 
         own = self.state_dict()
